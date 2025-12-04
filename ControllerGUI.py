@@ -61,6 +61,20 @@ from numeric_keypad import NumericKeypad
 
 # ============================================================================
 # Constants and Global Variables
+# =====================
+# Axis scaling and units dictionary
+# =====================
+# Example: { 'A': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360}, ... }
+AXIS_UNITS = {
+    'A': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'B': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'C': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'D': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'E': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'F': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'G': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'H': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+}
 # ============================================================================
 
 
@@ -408,7 +422,7 @@ def handle_servo_event(event, values):
                         prev_log = window['DEBUG_LOG'].get()
                         new_log = f"Sent: {cmd}\nReply: {response}"
                         window['DEBUG_LOG'].update(prev_log + new_log + "\n")
-                        sg.popup(f'Sent: {cmd}\nResponse: {response}', keep_on_top=True)
+                        # Popup only for data entry OK, not for motor control buttons
                     except Exception as e:
                         sg.popup_error(f'Error sending command: {e}', keep_on_top=True)
                 else:
@@ -446,8 +460,7 @@ def handle_servo_event(event, values):
                             prev_log = window['DEBUG_LOG'].get()
                             new_log = f"Sent: {cmd}\nReply: {response}"
                             window['DEBUG_LOG'].update(prev_log + new_log + "\n")
-                            sg.popup(f'Sent: {cmd}\nResponse: {response}', keep_on_top=True)
-                            # Immediately poll and update indicator for this servo if enable/disable
+                            # Popup only for data entry OK, not for motor control buttons
                             if action in ['enable', 'disable']:
                                 poll_and_update_indicator(i-1)
                         except Exception as e:
@@ -498,7 +511,7 @@ except Exception as e:
 # -----------------------------
 while True:
     print('[DEBUG] Main event loop running')
-    event, values = window.read(timeout=2000)
+    event, values = window.read(timeout=1000)
     poll_now = False
     if event is None or event == '__TIMEOUT__':
         poll_now = True
@@ -633,7 +646,7 @@ while True:
                     response = comm.send_command(dp_cmd)
                     prev_log = window['DEBUG_LOG'].get()
                     window['DEBUG_LOG'].update(prev_log + f'Sent: {dp_cmd}\nReply: {response}\n')
-                    sg.popup(f'Sent: {dp_cmd}\nResponse: {response}', keep_on_top=True)
+                    # Popup disabled for Zero Position button
                 except Exception as e:
                     sg.popup_error(f'Error sending DP command: {e}', keep_on_top=True)
             else:
