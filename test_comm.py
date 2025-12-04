@@ -64,7 +64,7 @@ if controller_type == 'CommMode2':
         print("No response from Galil controller. Connection may not be established.")
 
 # Example usage:
-comm.send_command('MG _MOA')  # Or 'CMD:REQUEST_BUTTON_STATES' for ClearCore
+comm.send_command('MG _RPA')  # Or 'CMD:REQUEST_BUTTON_STATES' for ClearCore
 response = comm.receive_response(timeout=2.0)
 print("Received:", response)
 comm.close()

@@ -3,47 +3,17 @@
                          CONTROLLER GUI SYSTEM (MINIMAL)
 ================================================================================
 
-Author: gskovira01
-Date: December 4, 2025
-Version: 1.0.0
-
 PURPOSE:
     Minimal GUI starter for controller interface, with main window and numeric keypad popup.
     Based on Servo_Control_8_Axis.py window and popup logic.
 
     Features:
     - Tabbed interface for 8 servos
-    - Modular numeric keypad popup for value entry (see numeric_keypad.py)
-        The numeric keypad is designed as a reusable module and can be imported into other GUIs or scripts.
-        It provides a touchscreen-friendly interface for entering numeric values, with validation and range limits.
+    - Numeric keypad popup for value entry
     - Dynamic command mapping for Galil and ClearCore controllers
     - Periodic status polling and indicator lights for each servo
-
-FUNCTIONS:
-    get_controller_type_from_ini(ini_path):
-        Reads the controller type from the INI file.
-
-    build_servo_tab(servo_num):
-        Builds the tab layout for a single servo, including status indicator, value fields, and control buttons.
-
-    poll_and_update_indicator(axis_index):
-        Polls the controller for the enable/disable status of the given axis and updates the indicator and status text.
-
-    handle_servo_event(event, values):
-        Handles all servo-related button events (enable, disable, jog, set values).
-
-    poll_active_servo_indicator(window, comm, values=None):
-        Polls the currently active servo tab and updates its indicator.
-
-    show_numeric_keypad(...):
-        Numeric keypad popup for value entry (now in numeric_keypad.py).
-
 ================================================================================
 """
-
-# ============================================================================
-# Imports and Configuration
-# ============================================================================
 
 # ============================================================================
 # Imports and Configuration
@@ -54,11 +24,16 @@ import platform                            # Cross-platform OS detection and ada
 import configparser
 import os
 from communications import ControllerComm
-from numeric_keypad import NumericKeypad
 
 # ============================================================================
 # Constants and Global Variables
 # ============================================================================
+import FreeSimpleGUI as sg
+import threading  # For future use if needed
+import platform                            # Cross-platform OS detection and adaptation
+import configparser
+import os
+from communications import ControllerComm
 
 
 # ============================================================================
@@ -73,16 +48,10 @@ IS_RASPBERRY_PI = platform.system() == "Linux" and platform.machine().startswith
 GLOBAL_FONT = ('Courier New', 10)
 POSITION_LABEL_FONT = ('Courier New', 10, 'bold')
 CLEAR_BUTTON_FONT = ('Courier New', 9)
-# Dictionary mapping each field to its min and max values (same for all servos)
-NUMERIC_LIMITS = {
-    'speed': (0, 54000),
-    'accel': (0, 54000),
-    'decel': (0, 54000),
-    'abs_pos': (0, 54000),
-#     'rel_pos': (0, 54000)
-}
-# Automatically generate command mappings for all 8 servos
+POSITION_LIMITS = {1: (0, 180), 2: (0, 180), 3: (0, 180), 4: (0, 180), 5: (0, 180), 6: (0, 180), 7: (0, 180), 8: (0, 180)}
 
+
+# Automatically generate command mappings for all 8 servos
 # -----------------------------
 # Command Mapping Dictionaries
 # -----------------------------
@@ -190,8 +159,7 @@ def build_servo_tab(servo_num):
     """
     return [
         [sg.Text(f'Servo {servo_num}', font=POSITION_LABEL_FONT),
-         sg.Text('●', key=f'S{servo_num}_status_light', font=('Courier New', 16), text_color='gray'),
-         sg.Text('Disabled', key=f'S{servo_num}_status_text', font=GLOBAL_FONT, text_color='gray')],
+         sg.Text('●', key=f'S{servo_num}_status_light', font=('Courier New', 16), text_color='gray')],
         [sg.Button('Clear Faults', key=f'S{servo_num}_clear_faults', size=(14,2), font=GLOBAL_FONT)],
         [sg.Text('Speed:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_speed', size=(10,1), font=GLOBAL_FONT, enable_events=True),
@@ -221,6 +189,63 @@ def build_servo_tab(servo_num):
          sg.Button('Jog', key=f'S{servo_num}_jog', size=(14,2), font=GLOBAL_FONT)]
     ]
 
+def show_numeric_keypad(title, current_value, min_val=0, max_val=54000):
+###############################################################################
+    """
+    Custom numeric keypad popup for touchscreen input.
+    Args:
+        title (str): Popup window title
+        current_value (int): Initial value to display
+        min_val (int): Minimum allowed value
+        max_val (int): Maximum allowed value
+    Returns:
+        int or None: Entered value or None if cancelled
+    """
+    layout = [
+        [sg.Text(title, font=GLOBAL_FONT)],
+        [sg.Text('Current Value:', font=GLOBAL_FONT), 
+         sg.InputText(str(current_value), key='display', size=(15, 1), font=GLOBAL_FONT, justification='center', readonly=False)],
+        [sg.Button('7', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('8', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('9', size=(6, 2), font=GLOBAL_FONT)],
+        [sg.Button('4', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('5', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('6', size=(6, 2), font=GLOBAL_FONT)],
+        [sg.Button('1', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('2', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('3', size=(6, 2), font=GLOBAL_FONT)],
+        [sg.Button('Clear', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('0', size=(6, 2), font=GLOBAL_FONT), 
+         sg.Button('⌫', size=(6, 2), font=GLOBAL_FONT)],
+        [sg.Button('Cancel', size=(8, 2), font=GLOBAL_FONT), 
+         sg.Button('OK', size=(8, 2), font=GLOBAL_FONT)]
+    ]
+    # Upper right corner positioning for all platforms
+    location = (50, 50)  # Upper left corner for all platforms
+    popup_window = sg.Window(title, layout, modal=True, finalize=True, location=location, keep_on_top=True)
+    while True:
+        event, values = popup_window.read()
+        if event in (sg.WIN_CLOSED, 'Cancel'):
+            popup_window.close()
+            return None
+        elif event == 'OK':
+            try:
+                result = int(values['display'])
+                if min_val <= result <= max_val:
+                    popup_window.close()
+                    return result
+                else:
+                    sg.popup_error(f'Value must be between {min_val} and {max_val}', keep_on_top=True, location=(50, 50), font=GLOBAL_FONT)
+            except ValueError:
+                sg.popup_error('Please enter a valid number', keep_on_top=True, location=(50, 50), font=GLOBAL_FONT)
+        elif event == 'Clear':
+            popup_window['display'].update('0')
+        elif event == '⌫':  # Backspace
+            current = values['display']
+            popup_window['display'].update(current[:-1])
+        elif event in '0123456789':
+            current = values['display']
+            popup_window['display'].update(current + event)
 
 
 # Create a tab for each servo (1-8)
@@ -249,49 +274,36 @@ for i in range(1, 9):
 # GUI Layout
 ###############################################################################
 layout = [
-    [
-        sg.TabGroup([servo_tabs], key='TABGROUP', enable_events=True),
-        sg.Push(),
-        sg.Button('Shutdown', key='SHUTDOWN', size=(8,1), button_color=('white', 'red'), font=GLOBAL_FONT)
-    ],
-    [sg.Multiline('', key='DEBUG_LOG', size=(80, 8), font=('Courier New', 9), autoscroll=True, disabled=False, text_color='black', border_width=0)],
+    [sg.TabGroup([servo_tabs], key='TABGROUP', enable_events=True)],
+    [sg.Text(' ', size=(60, 1), font=GLOBAL_FONT),
+     sg.Button('Test Status Poll', key='TEST_STATUS_POLL', size=(16,2), button_color=('white', 'blue'), font=GLOBAL_FONT),
+     sg.Button('Shutdown', key='SHUTDOWN', size=(14,2), button_color=('white', 'red'), font=GLOBAL_FONT)],
+    # Status/debug window always at the bottom
+    [sg.Multiline('', key='DEBUG_LOG', size=(80, 8), font=('Courier New', 9), autoscroll=True, disabled=True)]
 ]
-window = sg.Window("Controller GUI", layout, size=(700, 460), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True)
+window = sg.Window("Controller GUI", layout, size=(700, 550), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True)
 ###############################################################################
+
+
 # Show popup if communications not initialized
 ###############################################################################
 if comm is None:
     sg.popup_error('Controller communications not initialized. Check INI file and hardware connection.', keep_on_top=True)
 
-
-# --- Define poll_and_update_indicator before it is called ---
-def poll_and_update_indicator(axis_index):
-    """Polls the controller for the enable/disable status of the given axis and updates the indicator and status text."""
-    axis_letter = AXIS_LETTERS[axis_index]
-    status_cmd = f'MG _MO{axis_letter}'
-    raw_resp = None
-    if comm:
+# --- Update status indicator for the active servo on startup (after function is defined) ---
+###############################################################################
+try:
+    # Default to first servo tab if none selected
+    active_tab = window['TABGROUP'].get() if 'TABGROUP' in window.AllKeysDict else None
+    active_servo = 1
+    if active_tab:
         try:
-            comm.send_command(status_cmd)
-            if hasattr(comm, 'mode') and comm.mode == 'CommMode2':
-                for attempt in range(5):
-                    resp = comm.receive_response(timeout=0.5)
-                    if resp is None:
-                        continue
-                    resp = str(resp).strip()
-                    if resp == ':':
-                        continue
-                    raw_resp = resp
-                    break
-            else:
-                if hasattr(comm, 'message_queue'):
-                    import queue
-                    try:
-                        raw_resp = str(comm.message_queue.get(timeout=0.5)).strip()
-                    except queue.Empty:
-                        raw_resp = None
+            active_servo = int(active_tab.replace('TAB', ''))
         except Exception:
-            raw_resp = None
+            active_servo = 1
+    poll_and_update_indicator(active_servo - 1)
+except Exception as e:
+    window['DEBUG_LOG'].update(f'Error updating indicator on startup: {e}')
 
 
 def poll_and_update_indicator(axis_index):
@@ -323,8 +335,6 @@ def poll_and_update_indicator(axis_index):
             raw_resp = None
     indicator_text = '●'
     indicator_color = 'gray'
-    status_text = 'Disabled'
-    status_color = 'white'
     if raw_resp:
         import re
         float_matches = re.findall(r'-?\d+\.\d+', raw_resp)
@@ -333,22 +343,13 @@ def poll_and_update_indicator(axis_index):
                 val = float(float_matches[0])
                 if abs(val) < 0.01:
                     indicator_color = '#00FF00'  # Bright green for enabled
-                    status_text = 'Enabled'
-                    status_color = 'white'
                 elif abs(val - 1.0) < 0.01:
                     indicator_color = '#FFFF00'  # Bright yellow for disabled
-                    status_text = 'Disabled'
-                    status_color = 'white'
                 else:
                     indicator_color = 'gray'
-                    status_text = 'Disabled'
-                    status_color = 'white'
             except Exception:
                 indicator_color = 'gray'
-                status_text = 'Disabled'
-                status_color = 'white'
     window[f'S{axis_index+1}_status_light'].update('●', text_color=indicator_color)
-    window[f'S{axis_index+1}_status_text'].update(status_text, text_color=status_color)
 
 def handle_servo_event(event, values):
     """
@@ -372,11 +373,6 @@ def handle_servo_event(event, values):
                 except ValueError:
                     sg.popup_error(f'Invalid value for {field}', keep_on_top=True)
                     return
-                # Validate min/max for this field
-                min_val, max_val = NUMERIC_LIMITS.get(field, (0, 54000))
-                if not (min_val <= value <= max_val):
-                    sg.popup_error(f'Value for {field} must be between {min_val} and {max_val}', keep_on_top=True)
-                    return
                 cmd_func = COMMAND_MAP[map_key]
                 if callable(cmd_func):
                     cmd = cmd_func(value)
@@ -386,10 +382,6 @@ def handle_servo_event(event, values):
                 if comm:
                     try:
                         response = comm.send_command(cmd)
-                        # Log request and reply in DEBUG_LOG
-                        prev_log = window['DEBUG_LOG'].get()
-                        new_log = f"Sent: {cmd}\nReply: {response}"
-                        window['DEBUG_LOG'].update(prev_log + new_log + "\n")
                         sg.popup(f'Sent: {cmd}\nResponse: {response}', keep_on_top=True)
                     except Exception as e:
                         sg.popup_error(f'Error sending command: {e}', keep_on_top=True)
@@ -424,10 +416,6 @@ def handle_servo_event(event, values):
                     if comm:
                         try:
                             response = comm.send_command(cmd)
-                            # Log request and reply in DEBUG_LOG
-                            prev_log = window['DEBUG_LOG'].get()
-                            new_log = f"Sent: {cmd}\nReply: {response}"
-                            window['DEBUG_LOG'].update(prev_log + new_log + "\n")
                             sg.popup(f'Sent: {cmd}\nResponse: {response}', keep_on_top=True)
                             # Immediately poll and update indicator for this servo if enable/disable
                             if action in ['enable', 'disable']:
@@ -480,57 +468,20 @@ except Exception as e:
 # -----------------------------
 while True:
     # Poll every 5 seconds for status updates
-    event, values = window.read(timeout=1000)
+    event, values = window.read(timeout=5000)
     if event == sg.WIN_CLOSED:
         break
-    # Periodically query servo enable status and position every 0.5 seconds
+    # Periodically query servo enable status every 2 seconds
     poll_now = False
-    if event is None:
+    if event is None or event == 'TEST_STATUS_POLL':
         poll_now = True
     elif event == 'TABGROUP':
         poll_now = True
     if poll_now:
         try:
             poll_active_servo_indicator(window, comm, values)
-            # Poll and update Actual Position for all servos, with debug logging
-            for i in range(1, 9):
-                import time
-                axis_letter = chr(64 + i)  # 1->A, 2->B, etc.
-                try:
-                    pos_cmd = f'MG _RP{axis_letter}'
-                    comm.send_command(pos_cmd)
-                    # Drain the queue and use only the latest response
-                    pos_resp = None
-                    while True:
-                        try:
-                            resp = comm.receive_response(timeout=0.1)
-                            if resp is not None:
-                                pos_resp = resp
-                            else:
-                                break
-                        except Exception:
-                            break
-                    print(f'Polling {pos_cmd}: Received -> {pos_resp}')
-                    pos_val = str(pos_resp).strip() if pos_resp is not None else 'ERR'
-                    # Only update if a valid response is received
-                    if pos_resp is not None and pos_val.replace('.', '', 1).isdigit():
-                        try:
-                            pos_val_num = int(float(pos_val))
-                        except Exception:
-                            pos_val_num = pos_val
-                        window[f'S{i}_actual_pos'].update(str(pos_val_num))
-                    else:
-                        window[f'S{i}_actual_pos'].update('ERR')
-                    # Log the response for debugging
-                    prev_log = window['DEBUG_LOG'].get()
-                    window['DEBUG_LOG'].update(prev_log + f'Axis {axis_letter}: {pos_cmd} -> {pos_val}\n')
-                    # No additional delay needed for 1s polling
-                except Exception as e:
-                    window[f'S{i}_actual_pos'].update('ERR')
-                    prev_log = window['DEBUG_LOG'].get()
-                    window['DEBUG_LOG'].update(prev_log + f'Axis {axis_letter}: ERROR {e}\n')
         except Exception as e:
-            window['DEBUG_LOG'].update(f'Error polling indicator/position: {e}')
+            window['DEBUG_LOG'].update(f'Error polling indicator: {e}')
         continue
     # Show numeric keypad when keypad button is clicked
     if event in NUMERIC_KEYPAD_BUTTONS:
@@ -544,16 +495,10 @@ while True:
             current_val = int(current_val)
         except (ValueError, TypeError):
             current_val = 0
-        # Lookup min and max for this field from NUMERIC_LIMITS
-        min_val, max_val = NUMERIC_LIMITS.get(field, (0, 54000))
-        keypad = NumericKeypad(
-            title=f'Enter value for {input_key}',
-            current_value=current_val,
-            min_val=min_val,
-            max_val=max_val,
-            font=GLOBAL_FONT
-        )
-        result = keypad.show()
+        min_val, max_val = 0, 54000
+        if 'abs_pos' in field or 'rel_pos' in field:
+            min_val, max_val = 0, 180
+        result = show_numeric_keypad(f'Enter value for {input_key}', current_val, min_val, max_val)
         if result is not None:
             window[input_key].update(str(result))
         continue

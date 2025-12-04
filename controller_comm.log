@@ -123,3 +123,109 @@ INFO:root:Test log entry
 2025-12-04 10:32:35,916 ERROR: Communications Error (Serial): serial_config must include 'port' for CommMode2.
 2025-12-04 10:33:34,442 INFO: ControllerComm module loaded. Logging initialized.
 2025-12-04 10:33:34,530 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:32:53,391 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:32:53,462 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:34:17,553 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:34:17,624 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:36:15,808 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:36:15,873 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:36:50,345 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:36:50,400 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:37:33,203 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:37:33,276 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:49:53,907 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:49:53,982 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:53:49,089 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:53:49,156 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:55:18,607 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:55:18,671 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:55:54,486 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:55:54,552 INFO: Serial receiver thread started on port COM7
+2025-12-04 11:58:56,981 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 11:58:57,039 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:01:57,135 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:01:57,213 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:03:08,811 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:03:08,877 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:04:29,102 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:04:29,175 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:04:57,617 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:04:57,679 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:05:13,645 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:05:13,703 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:05:33,245 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:05:33,307 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:06:40,700 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:06:40,774 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:08:00,872 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:08:00,942 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:09:29,446 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:09:29,514 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:10:31,507 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:10:31,600 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:11:38,425 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:11:38,493 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:12:39,733 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:12:39,783 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:13:49,198 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:13:49,283 INFO: Serial receiver thread started on port COM7
+2025-12-04 12:14:07,085 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 12:14:07,158 INFO: Serial receiver thread started on port COM7
+2025-12-04 13:57:35,303 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 13:57:35,398 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:06:59,906 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:06:59,979 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:25:44,878 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:25:44,952 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:26:37,216 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:26:37,280 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:28:15,844 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:28:15,913 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:44:30,020 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:44:30,104 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:45:06,781 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:45:06,852 INFO: Serial receiver thread started on port COM7
+2025-12-04 14:59:55,654 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 14:59:55,734 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:08:17,686 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:08:17,761 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:10:30,986 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:10:31,061 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:11:33,194 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:11:33,259 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:13:17,152 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:13:17,230 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:27:51,003 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:27:51,088 ERROR: Communications Error (Serial): could not open port 'COM7': PermissionError(13, 'Access is denied.', None, 5)
+2025-12-04 15:28:52,235 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:28:52,307 ERROR: Communications Error (Serial): could not open port 'COM7': PermissionError(13, 'Access is denied.', None, 5)
+2025-12-04 15:29:23,572 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:29:23,641 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:32:28,641 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:32:28,721 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:36:06,240 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:36:06,315 ERROR: Communications Error (Serial): could not open port 'COM7': PermissionError(13, 'Access is denied.', None, 5)
+2025-12-04 15:36:22,074 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:36:22,141 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:40:28,771 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:40:33,263 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:40:36,124 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:40:36,209 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:40:44,031 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:40:44,101 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:43:26,694 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:43:26,740 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:43:50,752 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:43:50,769 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:45:17,885 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:45:17,980 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:47:49,829 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:47:49,902 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:49:50,698 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:49:50,770 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:50:01,227 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:50:01,244 INFO: Serial receiver thread started on port COM7
+2025-12-04 15:52:21,341 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 15:52:21,424 INFO: Serial receiver thread started on port COM7
+2025-12-04 16:23:58,146 INFO: ControllerComm module loaded. Logging initialized.
+2025-12-04 16:23:58,254 INFO: Serial receiver thread started on port COM7
