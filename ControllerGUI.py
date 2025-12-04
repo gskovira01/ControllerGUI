@@ -14,6 +14,20 @@ PURPOSE:
     - Periodic status polling and indicator lights for each servo
 ================================================================================
 """
+
+# ============================================================================
+# Imports and Configuration
+# ============================================================================
+import FreeSimpleGUI as sg
+import threading  # For future use if needed
+import platform                            # Cross-platform OS detection and adaptation
+import configparser
+import os
+from communications import ControllerComm
+
+# ============================================================================
+# Constants and Global Variables
+# ============================================================================
 import FreeSimpleGUI as sg
 import threading  # For future use if needed
 import platform                            # Cross-platform OS detection and adaptation
@@ -72,6 +86,7 @@ for i in range(1, 9):
     CLEARCORE_COMMAND_MAP[f'S{i}_rel_pos'] = (lambda value, axis=i: f'SET_REL_POS_{axis}_{value}')
 
 # ===================== CONTROLLER TYPE SELECTION FROM INI =====================
+###############################################################################
 def get_controller_type_from_ini(ini_path='controller_config.ini'):
     """
     Reads the controller type from the INI file.
@@ -99,6 +114,7 @@ else:
     COMMAND_MAP = GALIL_COMMAND_MAP  # Default fallback
 
 # Parse INI and initialize ControllerComm with correct config
+###############################################################################
 # -----------------------------
 # Initialize ControllerComm with correct config from INI file
 # -----------------------------
@@ -132,6 +148,7 @@ except Exception as e:
     sg.popup_error(f'Failed to initialize controller communications: {e}', keep_on_top=True)
 
 def build_servo_tab(servo_num):
+###############################################################################
     """
     Build the tab layout for a single servo.
     Includes status indicator, value fields, and control buttons.
@@ -173,6 +190,7 @@ def build_servo_tab(servo_num):
     ]
 
 def show_numeric_keypad(title, current_value, min_val=0, max_val=54000):
+###############################################################################
     """
     Custom numeric keypad popup for touchscreen input.
     Args:
@@ -252,21 +270,44 @@ for i in range(1, 9):
         NUMERIC_INPUT_KEYS.append(f'S{i}_{field}')
         NUMERIC_KEYPAD_BUTTONS.append(f'S{i}_{field}_keypad')
 
+###############################################################################
+# GUI Layout
+###############################################################################
 layout = [
     [sg.TabGroup([servo_tabs], key='TABGROUP', enable_events=True)],
     [sg.Text(' ', size=(60, 1), font=GLOBAL_FONT),
      sg.Button('Test Status Poll', key='TEST_STATUS_POLL', size=(16,2), button_color=('white', 'blue'), font=GLOBAL_FONT),
      sg.Button('Shutdown', key='SHUTDOWN', size=(14,2), button_color=('white', 'red'), font=GLOBAL_FONT)],
+    # Status/debug window always at the bottom
     [sg.Multiline('', key='DEBUG_LOG', size=(80, 8), font=('Courier New', 9), autoscroll=True, disabled=True)]
 ]
 window = sg.Window("Controller GUI", layout, size=(700, 550), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True)
+###############################################################################
+
 
 # Show popup if communications not initialized
+###############################################################################
 if comm is None:
     sg.popup_error('Controller communications not initialized. Check INI file and hardware connection.', keep_on_top=True)
 
+# --- Update status indicator for the active servo on startup (after function is defined) ---
+###############################################################################
+try:
+    # Default to first servo tab if none selected
+    active_tab = window['TABGROUP'].get() if 'TABGROUP' in window.AllKeysDict else None
+    active_servo = 1
+    if active_tab:
+        try:
+            active_servo = int(active_tab.replace('TAB', ''))
+        except Exception:
+            active_servo = 1
+    poll_and_update_indicator(active_servo - 1)
+except Exception as e:
+    window['DEBUG_LOG'].update(f'Error updating indicator on startup: {e}')
+
 
 def poll_and_update_indicator(axis_index):
+###############################################################################
     axis_letter = AXIS_LETTERS[axis_index]
     status_cmd = f'MG _MO{axis_letter}'
     raw_resp = None
@@ -317,7 +358,6 @@ def handle_servo_event(event, values):
         event (str): Event key from PySimpleGUI
         values (dict): Current values from the GUI
     """
-    # Only handle direct button events (not input field changes)
     for i in range(1, 9):
         prefix = f'S{i}_'
         # Handle OK buttons for each field
@@ -386,134 +426,64 @@ def handle_servo_event(event, values):
                         sg.popup_error('Controller communications not initialized.', keep_on_top=True)
             return
 
+# Helper function to poll and update the currently active servo indicator
+def poll_active_servo_indicator(window, comm, values=None):
+    """
+    Polls the currently active servo tab and updates its indicator.
+    Args:
+        window: The PySimpleGUI window object
+        comm: The controller communication object
+        values: The current values dict (optional, for tab selection)
+    """
+    active_tab = None
+    if values and 'TABGROUP' in values:
+        active_tab = values['TABGROUP']
+    elif 'TABGROUP' in window.AllKeysDict:
+        active_tab = window['TABGROUP'].get()
+    active_servo = 1
+    if active_tab:
+        try:
+            active_servo = int(active_tab.replace('TAB', ''))
+        except Exception:
+            active_servo = 1
+    poll_and_update_indicator(active_servo - 1)
+
+
+# --- Update status indicator for the active servo on startup ---
+try:
+    poll_active_servo_indicator(window, comm)
+except Exception as e:
+    window['DEBUG_LOG'].update(f'Error updating indicator on startup: {e}')
+
+
+# --- Update status indicator for the active servo on startup ---
+try:
+    poll_active_servo_indicator(window, comm)
+except Exception as e:
+    window['DEBUG_LOG'].update(f'Error updating indicator on startup: {e}')
+
+
+# -----------------------------
+# Main event loop
+# -----------------------------
 while True:
-    # -----------------------------
-    # Main event loop
-    # -----------------------------
     # Poll every 5 seconds for status updates
     event, values = window.read(timeout=5000)
     if event == sg.WIN_CLOSED:
         break
-    # -----------------------------
     # Periodically query servo enable status every 2 seconds
-    # -----------------------------
-    # Poll on timer or when user switches tabs
     poll_now = False
     if event is None or event == 'TEST_STATUS_POLL':
         poll_now = True
     elif event == 'TABGROUP':
         poll_now = True
     if poll_now:
-        debug_lines = []
-        comm_error_popup_shown = False
-        poll_results = []
-        # Only poll the currently active servo tab
-        active_tab = values.get('TABGROUP')
-        active_servo = None
-        if active_tab:
-            # active_tab is like 'TAB1', 'TAB2', etc.
-            try:
-                active_servo = int(active_tab.replace('TAB', ''))
-            except Exception:
-                active_servo = 1
-        else:
-            active_servo = 1
-        i = active_servo
-        axis_letter = AXIS_LETTERS[i-1]
-        status_cmd = f'MG _MO{axis_letter}'  # Galil command to query motor state
-        status = None
-        raw_resp = None
-        tooltip = 'No response'
-        indicator_text = '●'
-        indicator_color = 'gray'
-        debug_line = f'Servo {i}: '
-        if comm:
-            try:
-                # For CommMode2 (serial), get response after sending command
-                response = comm.send_command(status_cmd)
-                raw_resp = None
-                if hasattr(comm, 'mode') and comm.mode == 'CommMode2':
-                    # Try up to 5 times to get a valid response
-                    for attempt in range(5):
-                        resp = comm.receive_response(timeout=0.5)
-                        if resp is None:
-                            continue
-                        resp = str(resp).strip()
-                        # If response is just ':', try again
-                        if resp == ':':
-                            continue
-                        raw_resp = resp
-                        break
-                else:
-                    # For other modes, use direct response or message queue
-                    if response is not None and isinstance(response, str):
-                        raw_resp = response.strip()
-                    elif hasattr(comm, 'message_queue'):
-                        import queue
-                        try:
-                            raw_resp = str(comm.message_queue.get(timeout=0.5)).strip()
-                        except queue.Empty:
-                            raw_resp = None
-                tooltip = f'Raw: {raw_resp}' if raw_resp else 'No response'
-                debug_line += f'response={raw_resp} '
-                if raw_resp is None and not comm_error_popup_shown:
-                    sg.popup_error('No response from controller for status polling. Check hardware connection and INI settings.', keep_on_top=True)
-                    comm_error_popup_shown = True
-                if raw_resp:
-                    import re
-                    # Log full raw response
-                    debug_line += f'raw_resp="{raw_resp}" '
-                    # Find all float-like numbers in the response
-                    float_matches = re.findall(r'-?\d+\.\d+', raw_resp)
-                    if float_matches:
-                        try:
-                            val = float(float_matches[0])
-                            debug_line += f'parsed={val} '
-                            if abs(val) < 0.01:
-                                indicator_color = '#00FF00'  # Bright green for enabled
-                                debug_line += '[ENABLED]'
-                            elif abs(val - 1.0) < 0.01:
-                                indicator_color = '#FFFF00'  # Bright yellow for disabled
-                                debug_line += '[DISABLED]'
-                            else:
-                                indicator_color = 'gray'
-                                debug_line += '[UNKNOWN]'
-                        except Exception as ex:
-                            debug_line += f'value parse error: {ex} [ERROR]'
-                            indicator_text = '?'
-                            indicator_color = 'gray'
-                    else:
-                        debug_line += 'no float found [ERROR]'
-                        indicator_text = '?'
-                        indicator_color = 'gray'
-                else:
-                    indicator_text = '?'
-                    indicator_color = 'gray'
-                    debug_line += '[NO RESPONSE]'
-                window[f'S{i}_status_light'].update('●', text_color=indicator_color)
-                poll_results.append(f'Servo {i}: {indicator_text} ({debug_line})')
-            except Exception as ex:
-                debug_line += f'polling exception: {ex} [EXCEPTION]'
-                if not comm_error_popup_shown:
-                    sg.popup_error(f'Polling exception: {ex}\nCheck hardware connection and INI settings.', keep_on_top=True)
-                    comm_error_popup_shown = True
-                window[f'S{i}_status_light'].update('?', text_color='gray')
-                poll_results.append(f'Servo {i}: ? (Exception: {ex})')
-        else:
-            window[f'S{i}_status_light'].update('?', text_color='gray')
-            debug_line += '[NO COMM]'
-            window['DEBUG_LOG'].update('Communications not initialized. Check INI file and hardware connection.')
-            poll_results.append(f'Servo {i}: ? [NO COMM]')
-        debug_lines.append(debug_line)
-        # Update debug log area
-        window['DEBUG_LOG'].update('\n'.join(debug_lines))
-        if event == 'TEST_STATUS_POLL':
-            sg.popup('\n'.join(poll_results), title='Status Poll Results', keep_on_top=True)
-        if event == 'TEST_STATUS_POLL':
-            continue
-    # -----------------------------
+        try:
+            poll_active_servo_indicator(window, comm, values)
+        except Exception as e:
+            window['DEBUG_LOG'].update(f'Error polling indicator: {e}')
+        continue
     # Show numeric keypad when keypad button is clicked
-    # -----------------------------
     if event in NUMERIC_KEYPAD_BUTTONS:
         # event is like 'S1_speed_keypad', extract field and servo
         parts = event.split('_')
@@ -532,9 +502,7 @@ while True:
         if result is not None:
             window[input_key].update(str(result))
         continue
-    # -----------------------------
     # Handle all servo button events (but not input field changes)
-    # -----------------------------
     if isinstance(event, str) and event.startswith('S') and '_' in event and not event.endswith(tuple(['speed','accel','decel','abs_pos','rel_pos'])):
         handle_servo_event(event, values)
     # ...existing code for other events...
