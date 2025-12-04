@@ -1,25 +1,28 @@
 """
 ================================================================================
-                         CONTROLLER GUI SYSTEM (MINIMAL)
+                        CONTROLLER GUI SYSTEM
 ================================================================================
 
 Author: gskovira01
-Date: December 4, 2025
-Version: 1.0.0
+Last Updated: December 4, 2025
+Version: 1.1.0
 
 PURPOSE:
-    Minimal GUI starter for controller interface, with main window and numeric keypad popup.
-    Based on Servo_Control_8_Axis.py window and popup logic.
+    Touchscreen-friendly GUI for 8-axis controller interface with modular numeric keypad popup.
+    Supports Galil and ClearCore controllers. Features tabbed interface, dynamic command mapping,
+    periodic status polling, indicator lights, and robust error handling.
 
-    Features:
-    - Tabbed interface for 8 servos
+KEY FEATURES:
+    - Tabbed interface for 8 servos (A-H)
     - Modular numeric keypad popup for value entry (see numeric_keypad.py)
-        The numeric keypad is designed as a reusable module and can be imported into other GUIs or scripts.
-        It provides a touchscreen-friendly interface for entering numeric values, with validation and range limits.
+    - Min/max validation for all numeric fields
     - Dynamic command mapping for Galil and ClearCore controllers
     - Periodic status polling and indicator lights for each servo
+    - Debug log window for sent/received commands and errors
+    - Zero Position button for each axis
+    - Improved error handling and user feedback
 
-FUNCTIONS:
+MAIN FUNCTIONS:
     get_controller_type_from_ini(ini_path):
         Reads the controller type from the INI file.
 
@@ -79,7 +82,7 @@ NUMERIC_LIMITS = {
     'accel': (0, 54000),
     'decel': (0, 54000),
     'abs_pos': (0, 54000),
-#     'rel_pos': (0, 54000)
+    'rel_pos': (-150000, 150000)
 }
 # Automatically generate command mappings for all 8 servos
 
@@ -153,27 +156,35 @@ comm = None
 try:
     config = configparser.ConfigParser()
     config.read('controller_config.ini')
-    if controller_type == 'CommMode1':
-        galil_config = dict(config.items('CommMode1')) if config.has_section('CommMode1') else {}
-        comm = ControllerComm(mode='CommMode1', galil_config=galil_config)
-    elif controller_type == 'CommMode2':
-        serial_config = dict(config.items('CommMode2')) if config.has_section('CommMode2') else {}
-        # Convert numeric values
-        if 'baudrate' in serial_config:
-            serial_config['baudrate'] = int(serial_config['baudrate'])
-        if 'timeout' in serial_config:
-            serial_config['timeout'] = float(serial_config['timeout'])
-        comm = ControllerComm(mode='CommMode2', serial_config=serial_config)
-    elif controller_type == 'CommMode3':
-        udp_config = dict(config.items('CommMode3')) if config.has_section('CommMode3') else {}
-        if 'port1' in udp_config:
-            udp_config['port1'] = int(udp_config['port1'])
-        if 'local_port' in udp_config:
-            udp_config['local_port'] = int(udp_config['local_port'])
-        comm = ControllerComm(mode='CommMode3', udp_config=udp_config)
-    else:
+    try:
+        if controller_type == 'CommMode1':
+            galil_config = dict(config.items('CommMode1')) if config.has_section('CommMode1') else {}
+            comm = ControllerComm(mode='CommMode1', galil_config=galil_config)
+        elif controller_type == 'CommMode2':
+            serial_config = dict(config.items('CommMode2')) if config.has_section('CommMode2') else {}
+            # Convert numeric values
+            if 'baudrate' in serial_config:
+                serial_config['baudrate'] = int(serial_config['baudrate'])
+            if 'timeout' in serial_config:
+                serial_config['timeout'] = float(serial_config['timeout'])
+            comm = ControllerComm(mode='CommMode2', serial_config=serial_config)
+        elif controller_type == 'CommMode3':
+            udp_config = dict(config.items('CommMode3')) if config.has_section('CommMode3') else {}
+            if 'port1' in udp_config:
+                udp_config['port1'] = int(udp_config['port1'])
+            if 'local_port' in udp_config:
+                udp_config['local_port'] = int(udp_config['local_port'])
+            comm = ControllerComm(mode='CommMode3', udp_config=udp_config)
+        else:
+            comm = None
+            sg.popup_error('Unknown controller type in INI file.', keep_on_top=True)
+        print(f'[DEBUG] ControllerComm initialized: comm={comm}, mode={getattr(comm, "mode", None)}')
+    except Exception as comm_error:
         comm = None
-        sg.popup_error('Unknown controller type in INI file.', keep_on_top=True)
+        import traceback
+        error_details = f'{comm_error}\n' + traceback.format_exc()
+        sg.popup_error(f'Failed to initialize controller communications:\n{comm_error}', keep_on_top=True)
+        print(f'[ERROR] Failed to initialize controller communications: {error_details}')
 except Exception as e:
     comm = None
     sg.popup_error(f'Failed to initialize controller communications: {e}', keep_on_top=True)
@@ -188,7 +199,7 @@ def build_servo_tab(servo_num):
     Returns:
         List: PySimpleGUI layout for the tab
     """
-    return [
+    layout = [
         [sg.Text(f'Servo {servo_num}', font=POSITION_LABEL_FONT),
          sg.Text('●', key=f'S{servo_num}_status_light', font=('Courier New', 16), text_color='gray'),
          sg.Text('Disabled', key=f'S{servo_num}_status_text', font=GLOBAL_FONT, text_color='gray')],
@@ -214,12 +225,18 @@ def build_servo_tab(servo_num):
          sg.Button('⌨', key=f'S{servo_num}_rel_pos_keypad', size=(2,1), font=GLOBAL_FONT),
          sg.Button('OK', key=f'S{servo_num}_rel_pos_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
         [sg.Text('Actual Position:', size=(18,1), font=GLOBAL_FONT), sg.Text('0', key=f'S{servo_num}_actual_pos', size=(10,1), font=GLOBAL_FONT)],
-        [sg.Button('Servo Enable', key=f'S{servo_num}_enable', size=(14,2), font=GLOBAL_FONT),
-         sg.Button('Servo Disable', key=f'S{servo_num}_disable', size=(14,2), font=GLOBAL_FONT)],
-        [sg.Button('Start Motion', key=f'S{servo_num}_start', size=(14,2), font=GLOBAL_FONT),
-         sg.Button('Stop Motion', key=f'S{servo_num}_stop', size=(14,2), font=GLOBAL_FONT),
-         sg.Button('Jog', key=f'S{servo_num}_jog', size=(14,2), font=GLOBAL_FONT)]
+        [
+            sg.Button('Servo Enable', key=f'S{servo_num}_enable', size=(12,2), font=GLOBAL_FONT),
+            sg.Button('Servo Disable', key=f'S{servo_num}_disable', size=(12,2), font=GLOBAL_FONT),
+            sg.Button('Zero Position', key=f'S{servo_num}_zero_pos', size=(12,2), font=GLOBAL_FONT)  # Default color (same as Jog)
+        ],
+        [
+            sg.Button('Start Motion', key=f'S{servo_num}_start', size=(12,2), font=GLOBAL_FONT),
+            sg.Button('Stop Motion', key=f'S{servo_num}_stop', size=(12,2), font=GLOBAL_FONT),
+            sg.Button('Jog', key=f'S{servo_num}_jog', size=(12,2), font=GLOBAL_FONT)
+        ]
     ]
+    return layout
 
 
 
@@ -266,57 +283,58 @@ if comm is None:
 
 # --- Define poll_and_update_indicator before it is called ---
 def poll_and_update_indicator(axis_index):
-    """Polls the controller for the enable/disable status of the given axis and updates the indicator and status text."""
-    axis_letter = AXIS_LETTERS[axis_index]
-    status_cmd = f'MG _MO{axis_letter}'
-    raw_resp = None
-    if comm:
-        try:
-            comm.send_command(status_cmd)
-            if hasattr(comm, 'mode') and comm.mode == 'CommMode2':
-                for attempt in range(5):
-                    resp = comm.receive_response(timeout=0.5)
-                    if resp is None:
-                        continue
-                    resp = str(resp).strip()
-                    if resp == ':':
-                        continue
-                    raw_resp = resp
-                    break
-            else:
-                if hasattr(comm, 'message_queue'):
-                    import queue
-                    try:
-                        raw_resp = str(comm.message_queue.get(timeout=0.5)).strip()
-                    except queue.Empty:
-                        raw_resp = None
-        except Exception:
-            raw_resp = None
-
-
-def poll_and_update_indicator(axis_index):
 ###############################################################################
     axis_letter = AXIS_LETTERS[axis_index]
     status_cmd = f'MG _MO{axis_letter}'
     raw_resp = None
     if comm:
         try:
+            # Clear out any old responses in the message queue before sending the status command
+            if hasattr(comm, 'message_queue'):
+                import queue
+                try:
+                    while True:
+                        comm.message_queue.get_nowait()
+                except queue.Empty:
+                    pass
             comm.send_command(status_cmd)
+            import re
+            found_valid = False
             if hasattr(comm, 'mode') and comm.mode == 'CommMode2':
-                for attempt in range(5):
+                for attempt in range(10):
                     resp = comm.receive_response(timeout=0.5)
                     if resp is None:
                         continue
                     resp = str(resp).strip()
-                    if resp == ':':
+                    if resp == ':' or not resp:
                         continue
-                    raw_resp = resp
-                    break
+                    # Look for a float (0.0 or 1.0) in the response
+                    float_matches = re.findall(r'-?\d+\.\d+', resp)
+                    if float_matches:
+                        val = float(float_matches[0])
+                        if abs(val) < 0.01 or abs(val - 1.0) < 0.01:
+                            raw_resp = resp
+                            found_valid = True
+                            break
+                if not found_valid:
+                    raw_resp = None
             else:
                 if hasattr(comm, 'message_queue'):
                     import queue
                     try:
-                        raw_resp = str(comm.message_queue.get(timeout=0.5)).strip()
+                        for _ in range(10):
+                            resp = str(comm.message_queue.get(timeout=0.5)).strip()
+                            if resp == ':' or not resp:
+                                continue
+                            float_matches = re.findall(r'-?\d+\.\d+', resp)
+                            if float_matches:
+                                val = float(float_matches[0])
+                                if abs(val) < 0.01 or abs(val - 1.0) < 0.01:
+                                    raw_resp = resp
+                                    found_valid = True
+                                    break
+                        if not found_valid:
+                            raw_resp = None
                     except queue.Empty:
                         raw_resp = None
         except Exception:
@@ -479,57 +497,100 @@ except Exception as e:
 # Main event loop
 # -----------------------------
 while True:
-    # Poll every 5 seconds for status updates
-    event, values = window.read(timeout=1000)
-    if event == sg.WIN_CLOSED:
-        break
-    # Periodically query servo enable status and position every 0.5 seconds
+    print('[DEBUG] Main event loop running')
+    event, values = window.read(timeout=2000)
     poll_now = False
-    if event is None:
+    if event is None or event == '__TIMEOUT__':
         poll_now = True
     elif event == 'TABGROUP':
         poll_now = True
+    print(f'[DEBUG] event={event}, poll_now={poll_now}')
+    if event == sg.WIN_CLOSED:
+        break
     if poll_now:
+        print('[POLL] Entered poll_now block')
+        print('[POLL] Polling only the active servo for actual position...')
+        # --- Add counters for consecutive invalid responses ---
+        if not hasattr(window, '_invalid_resp_counters'):
+            window._invalid_resp_counters = [0]*8  # One for each axis
+        if not hasattr(window, '_last_valid_pos'):
+            window._last_valid_pos = ['']*8
         try:
-            poll_active_servo_indicator(window, comm, values)
-            # Poll and update Actual Position for all servos, with debug logging
-            for i in range(1, 9):
-                import time
-                axis_letter = chr(64 + i)  # 1->A, 2->B, etc.
+            try:
+                poll_active_servo_indicator(window, comm, values)
+            except Exception as e:
+                print(f'[POLL] Exception in poll_active_servo_indicator: {e}')
+            print('[POLL] After poll_active_servo_indicator, before MG _RPx for active tab')
+            # Determine active tab/servo
+            active_tab = None
+            if values and 'TABGROUP' in values:
+                active_tab = values['TABGROUP']
+            elif 'TABGROUP' in window.AllKeysDict:
+                active_tab = window['TABGROUP'].get()
+            active_servo = 1
+            if active_tab:
                 try:
-                    pos_cmd = f'MG _RP{axis_letter}'
-                    comm.send_command(pos_cmd)
-                    # Drain the queue and use only the latest response
-                    pos_resp = None
-                    while True:
-                        try:
-                            resp = comm.receive_response(timeout=0.1)
-                            if resp is not None:
-                                pos_resp = resp
-                            else:
-                                break
-                        except Exception:
+                    active_servo = int(str(active_tab).replace('TAB', ''))
+                except Exception:
+                    active_servo = 1
+            i = active_servo
+            axis_letter = chr(64 + i)
+            try:
+                pos_cmd = f'MG _RP{axis_letter}'
+                print(f'[POLL] Sending: {pos_cmd}')
+                send_result = comm.send_command(pos_cmd)
+                print(f'[POLL] send_command result: {send_result}')
+                pos_resp = None
+                while True:
+                    try:
+                        resp = comm.receive_response(timeout=0.1)
+                        if resp is not None:
+                            pos_resp = resp
+                        else:
                             break
-                    print(f'Polling {pos_cmd}: Received -> {pos_resp}')
-                    pos_val = str(pos_resp).strip() if pos_resp is not None else 'ERR'
-                    # Only update if a valid response is received
-                    if pos_resp is not None and pos_val.replace('.', '', 1).isdigit():
+                    except Exception as ex:
+                        print(f'[POLL] Exception in receive_response: {ex}')
+                        break
+                print(f'[POLL] {pos_cmd} response: {pos_resp}')
+                prev_log = window['DEBUG_LOG'].get()
+                window['DEBUG_LOG'].update(prev_log + f'[POLL] Sent: {pos_cmd}\n[POLL] Response: {repr(pos_resp)}\n')
+                # --- Only show 'N/A' after 5 consecutive invalid responses ---
+                import re
+                pos_val = None
+                valid = False
+                if pos_resp is not None and str(pos_resp).strip() != ':' and str(pos_resp).strip() != '':
+                    match = re.search(r'(-?\d+\.\d+)', str(pos_resp))
+                    if match:
+                        pos_val = match.group(1)
                         try:
                             pos_val_num = int(float(pos_val))
                         except Exception:
                             pos_val_num = pos_val
                         window[f'S{i}_actual_pos'].update(str(pos_val_num))
+                        window._last_valid_pos[i-1] = str(pos_val_num)
+                        window._invalid_resp_counters[i-1] = 0
+                        valid = True
+                if not valid:
+                    window._invalid_resp_counters[i-1] += 1
+                    if window._invalid_resp_counters[i-1] >= 5:
+                        window[f'S{i}_actual_pos'].update('N/A')
+                        log_val = 'N/A'
                     else:
-                        window[f'S{i}_actual_pos'].update('ERR')
-                    # Log the response for debugging
-                    prev_log = window['DEBUG_LOG'].get()
-                    window['DEBUG_LOG'].update(prev_log + f'Axis {axis_letter}: {pos_cmd} -> {pos_val}\n')
-                    # No additional delay needed for 1s polling
-                except Exception as e:
-                    window[f'S{i}_actual_pos'].update('ERR')
-                    prev_log = window['DEBUG_LOG'].get()
-                    window['DEBUG_LOG'].update(prev_log + f'Axis {axis_letter}: ERROR {e}\n')
+                        # Show last valid value, or blank if none
+                        last_val = window._last_valid_pos[i-1] if window._last_valid_pos[i-1] else ''
+                        window[f'S{i}_actual_pos'].update(last_val)
+                        log_val = last_val if last_val else 'N/A'
+                else:
+                    log_val = window._last_valid_pos[i-1]
+                prev_log = window['DEBUG_LOG'].get()
+                window['DEBUG_LOG'].update(prev_log + f'Axis {axis_letter}: {pos_cmd} -> {log_val}\n')
+            except Exception as e:
+                print(f'[POLL] Exception in polling loop for axis {axis_letter}: {e}')
+                window[f'S{i}_actual_pos'].update('N/A')
+                prev_log = window['DEBUG_LOG'].get()
+                window['DEBUG_LOG'].update(prev_log + f'Axis {axis_letter}: ERROR {e}\n')
         except Exception as e:
+            print(f'[POLL] Exception in poll_now block: {e}')
             window['DEBUG_LOG'].update(f'Error polling indicator/position: {e}')
         continue
     # Show numeric keypad when keypad button is clicked
@@ -556,6 +617,29 @@ while True:
         result = keypad.show()
         if result is not None:
             window[input_key].update(str(result))
+        continue
+    # Handle Zero Position button
+    if isinstance(event, str) and event.endswith('_zero_pos'):
+        # event is like 'S1_zero_pos', extract servo number
+        try:
+            servo_num = int(event[1:event.index('_')])
+            # DP command for single axis: DP n (n is the value for the axis, others omitted)
+            # For axis A=1, DP 0,,,,,,,
+            dp_args = [','] * 8
+            dp_args[servo_num - 1] = '0'
+            dp_cmd = f"DP {''.join(dp_args)}"
+            if comm:
+                try:
+                    response = comm.send_command(dp_cmd)
+                    prev_log = window['DEBUG_LOG'].get()
+                    window['DEBUG_LOG'].update(prev_log + f'Sent: {dp_cmd}\nReply: {response}\n')
+                    sg.popup(f'Sent: {dp_cmd}\nResponse: {response}', keep_on_top=True)
+                except Exception as e:
+                    sg.popup_error(f'Error sending DP command: {e}', keep_on_top=True)
+            else:
+                sg.popup_error('Controller communications not initialized.', keep_on_top=True)
+        except Exception as e:
+            sg.popup_error(f'Error parsing servo number: {e}', keep_on_top=True)
         continue
     # Handle all servo button events (but not input field changes)
     if isinstance(event, str) and event.startswith('S') and '_' in event and not event.endswith(tuple(['speed','accel','decel','abs_pos','rel_pos'])):
