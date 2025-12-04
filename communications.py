@@ -221,6 +221,7 @@ class ControllerComm:
             For query commands (MG, TP, etc.) in CommMode1, returns the response string.
             For other commands, returns True/False for success.
         """
+        logging.info(f'SENT: {cmd}')
         try:
             if self.mode == 'CommMode3':
                 ip = self.udp_config.get('ip1')
@@ -232,6 +233,9 @@ class ControllerComm:
             elif self.mode == 'CommMode2':
                 if self.ser:
                     self.ser.write((cmd + '\r').encode('utf-8'))
+                    # Force logging and debug queue for all commands
+                    logging.info(f'SENT: {cmd} [serial]')
+                    self.message_queue.put(f'SENT: {cmd}')
                     return True
                 else:
                     print("Communications Error: Serial port not open, cannot send command.")
@@ -243,9 +247,11 @@ class ControllerComm:
                 query_prefixes = ('MG', 'TP', 'RP', 'QR', 'QA', 'QZ', 'QM', 'QH', 'QX')
                 if cmd.strip().upper().startswith(query_prefixes):
                     response = self.gclib.GCommand(cmd)
+                    logging.info(f'RECV: {response}')
                     return response
                 else:
                     response = self.gclib.GCommand(cmd)
+                    logging.info(f'RECV: {response}')
                     self.message_queue.put(response)
                     return True
             else:
@@ -263,7 +269,9 @@ class ControllerComm:
             str or None: Received message or None if timeout
         """
         try:
-            return self.message_queue.get(timeout=timeout)
+            msg = self.message_queue.get(timeout=timeout)
+            logging.info(f'RECV: {msg}')
+            return msg
         except queue.Empty:
             return None
 
