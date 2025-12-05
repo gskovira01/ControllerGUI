@@ -66,7 +66,7 @@ from numeric_keypad import NumericKeypad
 # =====================
 # Example: { 'A': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360}, ... }
 AXIS_UNITS = {
-    'A': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
+    'A': {'pulses': 7200, 'degrees': 360, 'scaling': 7200/360, 'gearbox': 15},
     'B': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
     'C': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
     'D': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360, 'gearbox': 15},
@@ -220,25 +220,30 @@ def build_servo_tab(servo_num):
         [sg.Button('Clear Faults', key=f'S{servo_num}_clear_faults', size=(14,2), font=GLOBAL_FONT)],
         [sg.Text('Speed:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_speed', size=(10,1), font=GLOBAL_FONT, enable_events=True),
+            sg.Text('DPS ', font=GLOBAL_FONT),
          sg.Button('⌨', key=f'S{servo_num}_speed_keypad', size=(2,1), font=GLOBAL_FONT),
          sg.Button('OK', key=f'S{servo_num}_speed_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
         [sg.Text('Acceleration:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_accel', size=(10,1), font=GLOBAL_FONT, enable_events=True),
+            sg.Text('DPS²', font=GLOBAL_FONT),
          sg.Button('⌨', key=f'S{servo_num}_accel_keypad', size=(2,1), font=GLOBAL_FONT),
          sg.Button('OK', key=f'S{servo_num}_accel_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
         [sg.Text('Deceleration:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_decel', size=(10,1), font=GLOBAL_FONT, enable_events=True),
+            sg.Text('DPS²', font=GLOBAL_FONT),
          sg.Button('⌨', key=f'S{servo_num}_decel_keypad', size=(2,1), font=GLOBAL_FONT),
          sg.Button('OK', key=f'S{servo_num}_decel_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
-        [sg.Text('Absolute Position:', size=(18,1), font=GLOBAL_FONT),
+        [sg.Text('Absolute Position (DEG):', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_abs_pos', size=(10,1), font=GLOBAL_FONT, enable_events=True),
+            sg.Text('DEG ', font=GLOBAL_FONT),
          sg.Button('⌨', key=f'S{servo_num}_abs_pos_keypad', size=(2,1), font=GLOBAL_FONT),
          sg.Button('OK', key=f'S{servo_num}_abs_pos_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
-        [sg.Text('Relative Position:', size=(18,1), font=GLOBAL_FONT),
+        [sg.Text('Relative Position (DEG):', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_rel_pos', size=(10,1), font=GLOBAL_FONT, enable_events=True),
+            sg.Text('DEG ', font=GLOBAL_FONT),
          sg.Button('⌨', key=f'S{servo_num}_rel_pos_keypad', size=(2,1), font=GLOBAL_FONT),
          sg.Button('OK', key=f'S{servo_num}_rel_pos_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
-        [sg.Text('Actual Position:', size=(18,1), font=GLOBAL_FONT), sg.Text('0', key=f'S{servo_num}_actual_pos', size=(10,1), font=GLOBAL_FONT)],
+        [sg.Text('Actual Position:', size=(18,1), font=GLOBAL_FONT), sg.Text('0', key=f'S{servo_num}_actual_pos', size=(10,1), font=GLOBAL_FONT), sg.Text('DEG', font=GLOBAL_FONT)],
         [
             sg.Button('Servo Enable', key=f'S{servo_num}_enable', size=(12,2), font=GLOBAL_FONT),
             sg.Button('Servo Disable', key=f'S{servo_num}_disable', size=(12,2), font=GLOBAL_FONT),
@@ -391,6 +396,7 @@ def handle_servo_event(event, values):
     """
     for i in range(1, 9):
         prefix = f'S{i}_'
+        axis_letter = AXIS_LETTERS[i-1]
         # Handle OK buttons for each field
         for field in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']:
             if event == f'S{i}_{field}_ok':
@@ -400,18 +406,22 @@ def handle_servo_event(event, values):
                     sg.popup_error(f'Please enter a value for {field}', keep_on_top=True)
                     return
                 try:
-                    value = int(value)
+                    value_deg = float(value)
                 except ValueError:
                     sg.popup_error(f'Invalid value for {field}', keep_on_top=True)
                     return
-                # Validate min/max for this field
+                # Validate min/max for this field (in degrees)
                 min_val, max_val = NUMERIC_LIMITS.get(field, (0, 54000))
-                if not (min_val <= value <= max_val):
+                if not (min_val <= value_deg <= max_val):
                     sg.popup_error(f'Value for {field} must be between {min_val} and {max_val}', keep_on_top=True)
                     return
+                # Convert degrees to pulses for controller
+                scaling = AXIS_UNITS[axis_letter]['scaling']
+                gearbox = AXIS_UNITS[axis_letter]['gearbox']
+                value_pulses = int(round(value_deg * scaling * gearbox))
                 cmd_func = COMMAND_MAP[map_key]
                 if callable(cmd_func):
-                    cmd = cmd_func(value)
+                    cmd = cmd_func(value_pulses)
                 else:
                     cmd = cmd_func
                 # Send command to controller
@@ -554,16 +564,20 @@ while True:
                 send_result = comm.send_command(pos_cmd)
                 print(f'[POLL] send_command result: {send_result}')
                 pos_resp = None
-                while True:
+                for attempt in range(3):
                     try:
-                        resp = comm.receive_response(timeout=0.1)
-                        if resp is not None:
-                            pos_resp = resp
-                        else:
-                            break
+                        resp = comm.receive_response(timeout=0.3)
+                        resp_str = str(resp).strip() if resp is not None else ''
+                        # Ignore echoed command responses and empty/colon responses
+                        if resp_str and resp_str != ':' and not resp_str.startswith('SENT:'):
+                            # Only accept numeric responses
+                            import re
+                            match = re.search(r'(-?\d+(?:\.\d+)?)', resp_str)
+                            if match:
+                                pos_resp = match.group(1)
+                                break
                     except Exception as ex:
-                        print(f'[POLL] Exception in receive_response: {ex}')
-                        break
+                        print(f'[POLL] Exception in receive_response (attempt {attempt+1}): {ex}')
                 print(f'[POLL] {pos_cmd} response: {pos_resp}')
                 prev_log = window['DEBUG_LOG'].get()
                 window['DEBUG_LOG'].update(prev_log + f'[POLL] Sent: {pos_cmd}\n[POLL] Response: {repr(pos_resp)}\n')
@@ -572,17 +586,23 @@ while True:
                 pos_val = None
                 valid = False
                 if pos_resp is not None and str(pos_resp).strip() != ':' and str(pos_resp).strip() != '':
-                    match = re.search(r'(-?\d+\.\d+)', str(pos_resp))
-                    if match:
-                        pos_val = match.group(1)
-                        try:
-                            pos_val_num = int(float(pos_val))
-                        except Exception:
-                            pos_val_num = pos_val
-                        window[f'S{i}_actual_pos'].update(str(pos_val_num))
-                        window._last_valid_pos[i-1] = str(pos_val_num)
+                    try:
+                        pos_val_pulses = float(pos_resp)
+                        # Convert pulses to degrees for display
+                        scaling = AXIS_UNITS[axis_letter]['scaling']
+                        gearbox = AXIS_UNITS[axis_letter]['gearbox']
+                        pos_val_deg = pos_val_pulses / (scaling * gearbox)
+                        # Show '0' if response is 0.0000
+                        if abs(pos_val_deg) < 1e-6:
+                            pos_val_disp = 0
+                        else:
+                            pos_val_disp = round(pos_val_deg, 2)
+                        window[f'S{i}_actual_pos'].update(str(pos_val_disp))
+                        window._last_valid_pos[i-1] = str(pos_val_disp)
                         window._invalid_resp_counters[i-1] = 0
                         valid = True
+                    except Exception:
+                        pass
                 if not valid:
                     window._invalid_resp_counters[i-1] += 1
                     if window._invalid_resp_counters[i-1] >= 5:
