@@ -1,4 +1,6 @@
+#import FreeSimpleGUI as sg
 """
+print('[DEBUG] Script started')
 ================================================================================
                         CONTROLLER GUI SYSTEM
 ================================================================================
@@ -292,12 +294,75 @@ layout = [
     ],
     [sg.Multiline('', key='DEBUG_LOG', size=(80, 8), font=('Courier New', 9), autoscroll=True, disabled=False, text_color='black', border_width=0)],
 ]
+
 window = sg.Window("Controller GUI", layout, size=(700, 460), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True)
+
+
+
+
 ###############################################################################
 # Show popup if communications not initialized
 ###############################################################################
 if comm is None:
     sg.popup_error('Controller communications not initialized. Check INI file and hardware connection.', keep_on_top=True)
+
+
+window_closed = False
+# --- Main event loop (merged with prepopulation event handling) ---
+while True:
+    event, values = window.read()
+    print(f'[DEBUG] Event received: {event}')
+    if event == sg.WIN_CLOSED or event is None:
+        break
+    # Motor control logic for servo buttons
+    if isinstance(event, str) and event.startswith('S') and '_' in event:
+        # Extract servo number and action
+        parts = event.split('_')
+        if len(parts) == 2:
+            servo_num = parts[0][1:]
+            action = parts[1]
+            map_key = f'S{servo_num}_{action}'
+            if map_key in COMMAND_MAP:
+                cmd = COMMAND_MAP[map_key]
+                print(f'[DEBUG] Sending command: {cmd}')
+                if comm:
+                    response = comm.send_command(cmd)
+                    print(f'[DEBUG] Response: {response}')
+        # OK buttons for value entry
+        for field in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']:
+            if event == f'S{servo_num}_{field}_ok':
+                value = values.get(f'S{servo_num}_{field}', None)
+                if value is None or value == '':
+                    print(f'[DEBUG] No value entered for {field}')
+                    break
+                try:
+                    value_deg = float(value)
+                except ValueError:
+                    print(f'[DEBUG] Invalid value for {field}: {value}')
+                    break
+                scaling = AXIS_UNITS[AXIS_LETTERS[int(servo_num)-1]]['scaling']
+                gearbox = AXIS_UNITS[AXIS_LETTERS[int(servo_num)-1]]['gearbox']
+                value_pulses = int(round(value_deg * scaling * gearbox))
+                cmd_func = COMMAND_MAP[f'S{servo_num}_{field}']
+                if callable(cmd_func):
+                    cmd = cmd_func(value_pulses)
+                else:
+                    cmd = cmd_func
+                print(f'[DEBUG] Sending value command: {cmd}')
+                if comm:
+                    response = comm.send_command(cmd)
+                    print(f'[DEBUG] Response: {response}')
+                    import FreeSimpleGUI as sg
+                    sg.popup(f'Value for {field} set to {value_deg}', title='Confirmation', keep_on_top=True)
+        # Zero Position button
+        if event == f'S{servo_num}_zero_pos':
+            dp_args = [','] * 8
+            dp_args[int(servo_num) - 1] = '0'
+            dp_cmd = f"DP {''.join(dp_args)}"
+            print(f'[DEBUG] Sending zero position command: {dp_cmd}')
+            if comm:
+                response = comm.send_command(dp_cmd)
+                print(f'[DEBUG] Response: {response}')
 
 
 # --- Define poll_and_update_indicator before it is called ---
@@ -384,8 +449,11 @@ def poll_and_update_indicator(axis_index):
                 indicator_color = 'gray'
                 status_text = 'Disabled'
                 status_color = 'white'
-    window[f'S{axis_index+1}_status_light'].update('●', text_color=indicator_color)
-    window[f'S{axis_index+1}_status_text'].update(status_text, text_color=status_color)
+    if 'window_closed' in globals() and window_closed:
+        pass
+    else:
+        window[f'S{axis_index+1}_status_light'].update('●', text_color=indicator_color)
+        window[f'S{axis_index+1}_status_text'].update(status_text, text_color=status_color)
 
 def handle_servo_event(event, values):
     """
@@ -394,6 +462,8 @@ def handle_servo_event(event, values):
         event (str): Event key from PySimpleGUI
         values (dict): Current values from the GUI
     """
+    print(f'[DEBUG] handle_servo_event called with event: {event}')
+    print(f'[DEBUG] comm object: {comm}')
     for i in range(1, 9):
         prefix = f'S{i}_'
         axis_letter = AXIS_LETTERS[i-1]
