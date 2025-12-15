@@ -100,6 +100,7 @@ Rev 1.0.0 - December 2, 2025 - Initial release
 """
 import socket
 import queue
+import threading
 
 logging.info('ControllerComm module loaded. Logging initialized.')
 class ControllerComm:
@@ -118,6 +119,10 @@ class ControllerComm:
         port = self.serial_config.get('port')
         baudrate = self.serial_config.get('baudrate', 115200)
         timeout = self.serial_config.get('timeout', 0.1)
+        # Explicitly set parity, stopbits, and rtscts for Galil compatibility
+        parity = self.serial_config.get('parity', 'N')  # None/Even/Odd
+        stopbits = self.serial_config.get('stopbits', 1)
+        rtscts = self.serial_config.get('rtscts', False)
         if not port:
             msg = "Communications Error (Serial): serial_config must include 'port' for CommMode2."
             print(msg)
@@ -125,7 +130,14 @@ class ControllerComm:
             self.ser = None
             return
         try:
-            self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+            self.ser = serial.Serial(
+                port=port,
+                baudrate=baudrate,
+                timeout=timeout,
+                parity=parity,
+                stopbits=stopbits,
+                rtscts=rtscts
+            )
         except Exception as e:
             msg = f"Communications Error (Serial): {e}"
             print(msg)
@@ -178,6 +190,7 @@ class ControllerComm:
         self.serial_config = serial_config or {}
         self.message_queue = queue.Queue()  # Thread-safe queue for incoming messages
         self.galil_config = galil_config or {}
+        self._lock = threading.Lock()
         if self.mode == 'CommMode3':
             self._init_udp()
         elif self.mode == 'CommMode2':
@@ -223,6 +236,7 @@ class ControllerComm:
         """
         logging.info(f'SENT: {cmd}')
         try:
+            query_prefixes = ('MG', 'TP', 'RP', 'QR', 'QA', 'QZ', 'QM', 'QH', 'QX')
             if self.mode == 'CommMode3':
                 ip = self.udp_config.get('ip1')
                 port = self.udp_config.get('port1')
@@ -232,9 +246,21 @@ class ControllerComm:
                 return True
             elif self.mode == 'CommMode2':
                 if self.ser:
+                    # Flush buffers before sending
+                    self.ser.reset_input_buffer()
+                    self.ser.reset_output_buffer()
                     self.ser.write((cmd + '\r').encode('utf-8'))
-                    # Force logging and debug queue for all commands
                     logging.info(f'SENT: {cmd} [serial]')
+                    # For query commands, wait for and return all responses
+                    if cmd.strip().upper().startswith(query_prefixes):
+                        responses = []
+                        self.ser.timeout = 2.0
+                        while True:
+                            line = self.ser.readline()
+                            if not line:
+                                break
+                            responses.append(line.decode(errors='replace').strip())
+                        return '\n'.join(responses)
                     self.message_queue.put(f'SENT: {cmd}')
                     return True
                 else:
@@ -245,15 +271,17 @@ class ControllerComm:
                     raise RuntimeError("Galil Ethernet (gclib) not initialized.")
                 # If command is a query, return the response string
                 query_prefixes = ('MG', 'TP', 'RP', 'QR', 'QA', 'QZ', 'QM', 'QH', 'QX')
-                if cmd.strip().upper().startswith(query_prefixes):
-                    response = self.gclib.GCommand(cmd)
-                    logging.info(f'RECV: {response}')
-                    return response
-                else:
-                    response = self.gclib.GCommand(cmd)
-                    logging.info(f'RECV: {response}')
-                    self.message_queue.put(response)
-                    return True
+                # Serialize access to gclib to avoid concurrent reads
+                with self._lock:
+                    if cmd.strip().upper().startswith(query_prefixes):
+                        response = self.gclib.GCommand(cmd)
+                        logging.info(f'RECV: {response}')
+                        return response
+                    else:
+                        response = self.gclib.GCommand(cmd)
+                        logging.info(f'RECV: {response}')
+                        self.message_queue.put(response)
+                        return True
             else:
                 raise ValueError(f"Unknown mode: {self.mode}")
         except Exception as e:
