@@ -1,31 +1,80 @@
-# Utility: display ints without decimals, otherwise round to 1 decimal place
-def format_display_value(val):
+def send_batch_pr_program(comm, segments, axes='ABCDE', program_label='BATCHPR'):
+    """
+    Generate and execute a Galil batch PR program from segment data.
+    Each segment should have 'converted' pulses for each axis.
+    """
+    if comm is None or not hasattr(comm, 'gclib'):
+        raise RuntimeError('Controller communications not initialized or gclib not available.')
+    if not segments:
+        raise ValueError('No segments to send.')
+    # Build the program string
+    lines = [f'#{program_label}']
+    prev_pulses = [0] * len(axes)
+    import time
+    # Initialize prev_pulses to current actual position for each axis (like send_datapipe_pr)
     try:
-        fval = round(float(val), 1)
-        if fval.is_integer():
-            return str(int(fval))
-        return f"{fval:.1f}"
-    except Exception:
-        return str(val)
+        for axis_idx in range(len(axes)):
+            axis_letter = axes[axis_idx]
+            resp = comm.gclib.GCommand(f"MG _RP{axis_letter}")
+            val = 0
+            if isinstance(resp, str):
+                for line in resp.splitlines():
+                    try:
+                        val = int(float(line.strip()))
+                        break
+                    except Exception:
+                        continue
+            prev_pulses[axis_idx] = val
+    except Exception as e:
+        print(f"[WARN] Could not initialize prev_pulses from controller: {e}")
+        prev_pulses = [0] * len(axes)
+    for seg in segments:
+        deltas = []
+        for axis_idx in range(len(axes)):
+            pulses = seg['converted'][axis_idx]['pulses']
+            delta = pulses - prev_pulses[axis_idx]
+            deltas.append(delta)
+            prev_pulses[axis_idx] = pulses
+        pr_cmd = 'PR ' + ','.join(str(d) for d in deltas)
+        lines.append(pr_cmd)
+        lines.append(f'BG {axes}')
+        lines.append(f'AM {axes}')
+        time.sleep(0.02)  # 20 ms delay between commands
+    lines.append('EN')
+    program_str = '\n'.join(lines)
+    # Save the program to a file for GDK use
+    try:
+        with open('batch_pr.dmc', 'w') as f:
+            f.write(program_str)
+        print('[DEBUG] Batch PR program saved to batch_pr.dmc')
+    except Exception as e:
+        print(f'[WARN] Could not save batch PR program to file: {e}')
+    # Download and execute the program
+    comm.gclib.GProgramDownload(program_str)
+    comm.gclib.GCommand(f"XQ #{program_label}")
+    return program_str
+
 """
 ================================================================================
                         CONTROLLER GUI SYSTEM
 ================================================================================
 
 Author: gskovira01
-Last Updated: December 14, 2025
-Version: 1.2.0
+Last Updated: January 15, 2026
+Version: 1.3.0
 
 PURPOSE:
-    Touchscreen-friendly GUI for an 8-axis Galil controller interface with modular numeric keypad popup.
+    Touchscreen-friendly GUI for an 8-axis controller interface with modular numeric keypad popup.
     Features tabbed interface, dynamic command mapping, modular background polling,
-    indicator lights, and robust error handling.
+    indicator lights, and robust error handling. Supports mixed-mode operation with
+    Galil controllers (axes A-G) and MyActuator motors (axis H).
 
 KEY FEATURES:
     - Tabbed interface for 8 servos (A-H)
+    - Mixed-mode controller support (Galil + MyActuator)
     - Modular numeric keypad popup for value entry (see numeric_keypad.py)
     - Min/max validation for all numeric fields
-    - Dynamic command mapping for Galil controller
+    - Dynamic command mapping for multiple controller types
     - Modular background polling (see ControllerPolling.py):
         * Runs as a background thread
         * Periodically polls actual position, torque, and enable/disable status for each servo
@@ -35,15 +84,77 @@ KEY FEATURES:
     - Zero Position button for each axis
     - Improved error handling and user feedback
 
-FUNCTIONS DEFINED IN THIS FILE:
-    get_controller_type_from_ini(ini_path='controller_config.ini')
-        - Reads the controller type from the INI configuration file.
+REVISION HISTORY:
+    Rev 1.3.0 - January 15, 2026 - Add MyActuator motor support on axis H
+        - Added mixed-mode controller support (CommMode5 for MyActuator)
+        - Separate comm object (comm_h) for Servo H MyActuator motor
+        - Added get_comm_for_axis() and send_axis_command() routing functions
+        - Updated command sending to route axis H to MyActuator, axes A-G to Galil
+        - Updated controller_config.ini with CommMode5 section and AXIS_H parameters
+    
+    Rev 1.2.0 - December 14, 2025 - Previous updates
+        - Tabbed interface and background polling improvements
 
+HOW TO USE:
+    1. CONFIGURATION:
+       - Edit controller_config.ini to set up your controllers:
+         * [CommMode1] section: Galil controller IP address (for axes A-G)
+         * [CommMode5] section: MyActuator Waveshare IP, port, motor_id (for axis H)
+         * [AXIS_A] through [AXIS_H]: Per-axis parameters (limits, scaling, descriptions)
+    
+    2. RUNNING THE GUI:
+       - Execute: python ControllerGUI.py
+       - The GUI will initialize both controllers automatically
+       - Axes A-G use Galil controller (CommMode1)
+       - Axis H uses MyActuator motor (CommMode5)
+    
+    3. USING SERVO CONTROLS:
+       - Each servo tab (1-8) provides identical interface regardless of controller type
+       - Enable/Disable: Activate or deactivate the servo
+       - Speed/Accel/Decel: Set motion parameters (automatically converted to pulses)
+       - Absolute Position: Set target position, then click "Start Motion"
+       - Relative Position: Move by offset from current position
+       - Jog CW/CCW: Continuous rotation at set speed
+       - Zero Position: Set current position as zero reference
+    
+    4. MYACTUATOR-SPECIFIC NOTES (Servo H):
+       - Commands are automatically translated from Galil format to CAN protocol
+       - Position range: -180° to +180° (single-turn encoder with wrapping)
+       - Speed limit: 500 dps recommended (hardware max ~655 dps)
+       - Resolution: 0.01 degrees
+       - Connection via Waveshare CAN-to-ETH converter (TCP)
+    
+    5. DEBUG LOG:
+       - Monitor all commands and responses in the debug window
+       - Useful for troubleshooting communication issues
+
+FUNCTIONS DEFINED IN THIS FILE:
     build_servo_tab(servo_num)
         - Builds and returns the GUI layout for a single servo tab.
 
     handle_servo_event(event, values)
         - Handles all servo-related button events (enable, disable, jog, set values, etc.).
+
+    get_comm_for_axis(axis_letter)
+        - Returns the appropriate comm object (comm or comm_h) for the given axis.
+
+    send_axis_command(axis_letter, cmd)
+        - Routes commands to the appropriate controller based on axis.
+
+    get_limits(axis_letter, field)
+        - Returns per-axis min/max (supports speed/accel/decel/position overrides from INI).
+
+    compute_midpoint_speed(speed, accel, decel, mid_distance)
+        - Estimates achievable speed at midpoint of a move using accel/decel constraints.
+
+    update_mid_speed_display(window, servo_num)
+        - Updates the per-servo midpoint speed indicator based on current setpoints.
+
+    save_axis_description(axis_letter, description)
+        - Persists per-axis description back into controller_config.ini when edited in the GUI.
+
+    _refresh_description_colors(window)
+        - Forces description inputs to render black-on-white regardless of theme.
 
     (Polling logic moved to ControllerPolling.py)
         - See ControllerPolling.start_polling_thread(window, comm):
@@ -61,11 +172,33 @@ FUNCTIONS DEFINED IN THIS FILE:
 # ============================================================================
 import FreeSimpleGUI as sg
 import threading  # For future use if needed
-import platform                            # Cross-platform OS detection and adaptation
+import platform   # Cross-platform OS detection and adaptation
 import configparser
 import os
+import traceback
+import json
+import csv
+from typing import List, Dict, Any
 from communications import ControllerComm
 from numeric_keypad import NumericKeypad
+try:
+    import openpyxl  # Used for DataPipe Excel ingest
+    HAS_OPENPYXL = True
+except Exception:
+    HAS_OPENPYXL = False
+
+# Background ALL sequence control
+SEQ_THREAD = None
+SEQ_STOP_EVENT = None
+SEQ_RUNNING = False
+SEQUENCE_STATE_FILE = os.path.join(os.path.dirname(__file__), 'sequence_state.json')
+
+# Safety: Track last command type per servo to prevent unsafe Start Motion
+# Values: 'abs', 'rel', 'jog', or None
+LAST_MOTION_COMMAND = [None] * 8
+
+# Absolute safety limit: never allow more than 360 degrees rotation from zero
+ABSOLUTE_SAFETY_LIMIT_DEG = 360.0
 
 # ============================================================================
 # Constants and Global Variables
@@ -75,9 +208,21 @@ from numeric_keypad import NumericKeypad
 # Example: { 'A': {'pulses': 20000, 'degrees': 360, 'scaling': 20000/360}, ... }
 # Read axis parameters from controller_config.ini
 import configparser
+INI_PATH = os.path.join(os.path.dirname(__file__), 'controller_config.ini')
+# Default descriptors per servo; editable per-tab and echoed on ALL tab
+DEFAULT_SERVO_DESCRIPTIONS = {
+    1: 'Primary',
+    2: 'Secondary',
+    3: 'Tertiary Rotation',
+    4: 'Tertiary Lift',
+    5: 'Address',
+    6: '',
+    7: '',
+    8: ''
+}
 AXIS_UNITS = {}
 axis_ini = configparser.ConfigParser()
-axis_ini.read(os.path.join(os.path.dirname(__file__), 'controller_config.ini'))
+axis_ini.read(INI_PATH)
 for axis in 'ABCDEFGH':
     section = f'AXIS_{axis}'
     if section in axis_ini:
@@ -87,7 +232,14 @@ for axis in 'ABCDEFGH':
             'pulses': float(axis_ini[section]['pulses']),
             'degrees': float(axis_ini[section]['degrees']),
             'scaling': float(axis_ini[section]['scaling']),
-            'gearbox': float(axis_ini[section]['gearbox'])
+            'gearbox': float(axis_ini[section]['gearbox']),
+            'speed_min': float(axis_ini[section].get('speed_min', '0')),
+            'speed_max': float(axis_ini[section].get('speed_max', '360')),
+            'accel_min': float(axis_ini[section].get('accel_min', '0')),
+            'accel_max': float(axis_ini[section].get('accel_max', '180')),
+            'decel_min': float(axis_ini[section].get('decel_min', '0')),
+            'decel_max': float(axis_ini[section].get('decel_max', '180')),
+            'description': axis_ini[section].get('description', DEFAULT_SERVO_DESCRIPTIONS.get(ord(axis)-64, '')),
         }
 # ============================================================================
 
@@ -107,6 +259,20 @@ LOG_POSITION_POLLS = False  # Toggle to suppress noisy MG _RP logs in the GUI
 DEFAULT_INPUT_BG = '#FFFFFF'
 HIGHLIGHT_INPUT_BG = '#CCFFCC'
 PENDING_INPUT_BG = '#FFFACD'
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+def format_display_value(val):
+    """Display ints without decimals; otherwise one decimal place."""
+    try:
+        fval = round(float(val), 1)
+        if fval.is_integer():
+            return str(int(fval))
+        return f"{fval:.1f}"
+    except Exception:
+        return str(val)
 
 
 def pulses_to_degrees(raw_val, axis_letter):
@@ -155,6 +321,452 @@ def set_pending_highlight(window, servo_num, field):
         return pending
     except Exception:
         return False
+
+
+def _axis_letter_for_index(idx: int) -> str:
+    """Map 1-based axis index to Galil axis letter (A-H)."""
+    letters = AXIS_LETTERS
+    if 1 <= idx <= len(letters):
+        return letters[idx - 1]
+    return ''
+
+
+def _clamp_and_convert_deg_to_pulses(axis_letter: str, deg_val: float) -> Dict[str, Any]:
+    """Clamp degrees to axis limits, convert to pulses using scaling and gearbox."""
+    axis_units = AXIS_UNITS.get(axis_letter, {})
+    min_val = axis_units.get('min', NUMERIC_LIMITS['abs_pos'][0])
+    max_val = axis_units.get('max', NUMERIC_LIMITS['abs_pos'][1])
+    clamped_deg = max(min_val, min(max_val, deg_val))
+    scaling = axis_units.get('scaling', 1) or 1
+    gearbox = axis_units.get('gearbox', 1) or 1
+    pulses = int(round(clamped_deg * scaling * gearbox))
+    return {'deg': clamped_deg, 'pulses': pulses}
+
+
+def save_axis_description(axis_letter: str, description: str):
+    """Persist axis description to controller_config.ini for the given axis."""
+    try:
+        config = configparser.ConfigParser()
+        config.read(INI_PATH)
+        section = f'AXIS_{axis_letter}'
+        if section not in config:
+            return
+        config[section]['description'] = description
+        with open(INI_PATH, 'w') as fh:
+            config.write(fh)
+    except Exception:
+        pass
+
+
+def _refresh_description_colors(window):
+    """Force description inputs to black text on white background (theme-safe)."""
+    for i in range(1, 9):
+        key = f'S{i}_desc'
+        if key in window.AllKeysDict:
+            try:
+                window[key].update(text_color='black', background_color=DEFAULT_INPUT_BG)
+                # Force underlying Tk widget colors to override dark themes
+                widget = getattr(window[key], 'Widget', None)
+                if widget is not None:
+                    try:
+                        widget.configure(fg='black', bg=DEFAULT_INPUT_BG, insertbackground='black')
+                        # Some themes use readonlybackground; set defensively
+                        widget.configure(readonlybackground=DEFAULT_INPUT_BG)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+
+def load_datapipe_segments(file_path: str, sheet_name: str = None, row_start: int = 2, row_end: int = 61):
+    """Load up to 60 segments from Excel with columns Time, Axis 1-5 (degrees).
+
+    Header detection scans the first few rows (up to 10) to tolerate description rows above the real headers.
+    Time is auto-interpreted: if values look like seconds (e.g., 0.05), they are converted to milliseconds.
+    Returns (segments, seconds_to_ms_applied, missing_axes).
+    """
+    if not HAS_OPENPYXL:
+        raise RuntimeError('openpyxl is required to read Excel files. Please install it.')
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f'File not found: {file_path}')
+
+    def _norm(val):
+        if val is None:
+            return ''
+        return ''.join(str(val).strip().lower().replace('_', ' ').split())
+
+    required = ['time', 'axis1', 'axis2', 'axis3', 'axis4', 'axis5']
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    if sheet_name:
+        if sheet_name not in wb.sheetnames:
+            raise ValueError(f"Sheet '{sheet_name}' not found. Available sheets: {', '.join(wb.sheetnames)}")
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
+
+    header_row = None
+    headers = {}
+    best_match = (-1, None, {})  # (score, row_idx, headers)
+    # look for a header row in the first 10 rows to allow description rows above
+    for row_idx in range(1, 11):
+        row_headers = {}
+        for cell in ws[row_idx]:
+            norm = _norm(cell.value)
+            if norm:
+                row_headers[norm] = cell.column
+        score = sum(1 for k in required if k in row_headers)
+        if row_headers.get('time'):
+            score += 0.5  # weight time a bit
+        if score > best_match[0]:
+            best_match = (score, row_idx, row_headers)
+        if all(key in row_headers for key in required):
+            header_row = row_idx
+            headers = row_headers
+            break
+    if header_row is None:
+        score, row_idx, row_headers = best_match
+        if row_headers.get('time') and score >= 3.5:  # time + at least 3 axes
+            header_row = row_idx
+            headers = row_headers
+        else:
+            raise ValueError('Expected header row with: Time, Axis 1, Axis 2, Axis 3, Axis 4, Axis 5 (within first 10 rows).')
+
+    time_col = headers.get('time')
+    if time_col is None:
+        raise ValueError('Expected column: Time')
+
+    axis_cols = []
+    missing_axes = []
+    for i in range(1, 6):
+        col = headers.get(f'axis{i}')
+        axis_cols.append(col)
+        if col is None:
+            missing_axes.append(f'Axis {i}')
+
+    data_start = max(row_start, header_row + 1)
+    segments = []
+    raw_times = []
+    for row_idx in range(data_start, row_end + 1):
+        time_cell = ws.cell(row=row_idx, column=time_col)
+        time_val = time_cell.value
+        if time_val in (None, ''):
+            continue
+        try:
+            time_raw = float(time_val)
+        except Exception:
+            continue
+        axis_vals = []
+        for col in axis_cols:
+            if col is None:
+                axis_vals.append(0.0)
+                continue
+            val = ws.cell(row=row_idx, column=col).value
+            axis_vals.append(float(val) if val not in (None, '') else 0.0)
+        raw_times.append(time_raw)
+        segments.append({'time_ms': time_raw, 'axis_deg': axis_vals})
+        if len(segments) >= 60:
+            break
+    if not segments:
+        return segments, False, missing_axes
+    max_time = max(raw_times) if raw_times else 0
+    min_time = min(raw_times) if raw_times else 0
+    seconds_guess = (max_time <= 100) and (min_time < 10)
+    if seconds_guess:
+        for seg in segments:
+            seg['time_ms'] = seg['time_ms'] * 1000.0
+    return segments, seconds_guess, missing_axes
+
+
+def build_datapipe_tab(default_path: str):
+    """Build the DataPipe tab for loading Excel and sending contour data."""
+    return [
+        [sg.Text('Excel File'), sg.Input(default_path, key='DP_FILE', size=(60,1)), sg.FileBrowse('Browse', key='DP_BROWSE', target='DP_FILE')],
+        [sg.Text('Sheet Name'), sg.Input('Galil', key='DP_SHEET', size=(12,1)),
+         sg.Text('Rows'), sg.Input('2', key='DP_ROW_START', size=(4,1)), sg.Text('to'), sg.Input('61', key='DP_ROW_END', size=(4,1)),
+         sg.Text('Time column assumed milliseconds')],
+        [sg.Button('Load Preview', key='DP_LOAD', button_color=('white', 'green')),
+         sg.Button('Send to Controller', key='DP_SEND', button_color=('white', '#007ACC'), disabled=True),
+         sg.Button('Send via PR', key='DP_SEND_PR', button_color=('white', '#444444'), disabled=True),
+         sg.Button('Send Batch PR', key='DP_SEND_BATCH_PR', button_color=('white', '#8800CC'), disabled=True),
+         sg.Text('Run rows', size=(8,1)), sg.Input('5', key='DP_RUN_ROWS', size=(6,1), justification='center'),
+         sg.Text('', key='DP_STATUS', size=(50,1))],
+        [sg.Multiline('', key='DP_PREVIEW', size=(95,12), font=('Courier New', 9), autoscroll=True, write_only=True, disabled=False, border_width=1)]
+    ]
+
+
+def build_pvt_tab(default_path: str, default_sample_ms: int = 50):
+    """Build the PVT tab for axes A-D with fixed sample time (default 50 ms)."""
+    return [
+        [sg.Text('File'), sg.Input(default_path, key='PVT_FILE', size=(60,1)), sg.FileBrowse('Browse', key='PVT_BROWSE', target='PVT_FILE')],
+        [sg.Text('Sample (ms)', size=(12,1), font=GLOBAL_FONT),
+         sg.Input(str(default_sample_ms), key='PVT_SAMPLE_MS', size=(6,1), justification='center'),
+         sg.Text('Axes A-D · derived velocities', font=GLOBAL_FONT)],
+        [sg.Button('Load Preview', key='PVT_LOAD', button_color=('white', 'green')),
+         sg.Button('Send PVT', key='PVT_SEND', button_color=('white', '#007ACC'), disabled=True),
+         sg.Text('', key='PVT_STATUS', size=(50,1))],
+        [sg.Multiline('', key='PVT_PREVIEW', size=(95,12), font=('Courier New', 9), autoscroll=True, write_only=True, disabled=False, border_width=1)]
+    ]
+
+
+def _derive_velocities_deg(series_deg: List[float], sample_ms: float) -> List[float]:
+    """Central/forward/backward difference velocities in deg/s."""
+    dt = max(1e-6, sample_ms / 1000.0)
+    n = len(series_deg)
+    if n == 0:
+        return []
+    if n == 1:
+        return [0.0]
+    v = [0.0] * n
+    v[0] = (series_deg[1] - series_deg[0]) / dt
+    for i in range(1, n - 1):
+        v[i] = (series_deg[i + 1] - series_deg[i - 1]) / (2 * dt)
+    v[-1] = (series_deg[-1] - series_deg[-2]) / dt
+    return v
+
+
+def load_pvt_points(file_path: str, max_points: int = 200) -> List[List[float]]:
+    """Load PVT position rows (deg) for axes A-D from CSV/XLSX. Missing cells default to 0."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f'File not found: {file_path}')
+    ext = os.path.splitext(file_path)[1].lower()
+    rows: List[List[float]] = []
+    def _coerce(val):
+        try:
+            return float(val)
+        except Exception:
+            return None
+    if ext in ('.xlsx', '.xlsm', '.xls'):
+        if not HAS_OPENPYXL:
+            raise RuntimeError('openpyxl is required to read Excel PVT files. Please install it.')
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        ws = wb.active
+        for ridx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            vals = [cell.value for cell in row[:4]]
+            if all(v in (None, '') for v in vals):
+                continue
+            parsed = []
+            for v in vals:
+                c = _coerce(v)
+                parsed.append(c if c is not None else 0.0)
+            while len(parsed) < 4:
+                parsed.append(0.0)
+            if all(p == 0.0 for p in parsed):
+                continue
+            rows.append(parsed[:4])
+            if len(rows) >= max_points:
+                break
+    else:
+        with open(file_path, newline='') as fh:
+            reader = csv.reader(fh)
+            for line_idx, row in enumerate(reader):
+                if not row:
+                    continue
+                # Skip header if first row is non-numeric
+                if line_idx == 0:
+                    numeric_present = any(_coerce(row[i]) is not None for i in range(min(4, len(row))))
+                    if not numeric_present:
+                        continue
+                vals = row[:4]
+                parsed = []
+                for v in vals:
+                    c = _coerce(v)
+                    parsed.append(c if c is not None else 0.0)
+                while len(parsed) < 4:
+                    parsed.append(0.0)
+                if all(p == 0.0 for p in parsed):
+                    continue
+                rows.append(parsed[:4])
+                if len(rows) >= max_points:
+                    break
+    if not rows:
+        raise ValueError('No PVT data rows found (expect positions for A-D).')
+    return rows
+
+
+def prepare_pvt_payload(rows_deg: List[List[float]], sample_ms: float):
+    """Clamp to limits, convert to pulses, and derive velocities for axes A-D."""
+    if sample_ms <= 0:
+        raise ValueError('Sample time must be positive.')
+    axes = AXIS_LETTERS[:4]
+    count = len(rows_deg)
+    axis_payload = {}
+    for axis_idx, axis_letter in enumerate(axes):
+        series_deg = []
+        series_pulses = []
+        for row in rows_deg:
+            val_deg = float(row[axis_idx]) if axis_idx < len(row) else 0.0
+            conv = _clamp_and_convert_deg_to_pulses(axis_letter, val_deg)
+            series_deg.append(conv['deg'])
+            series_pulses.append(conv['pulses'])
+        vel_deg = _derive_velocities_deg(series_deg, sample_ms)
+        axis_units = AXIS_UNITS.get(axis_letter, {})
+        scale = axis_units.get('scaling', 1) or 1
+        gearbox = axis_units.get('gearbox', 1) or 1
+        vel_pulses = [int(round(v * scale * gearbox)) for v in vel_deg]
+        axis_payload[axis_letter] = {
+            'deg': series_deg,
+            'pulses': series_pulses,
+            'vel_deg': vel_deg,
+            'vel_pulses': vel_pulses,
+        }
+    return {'sample_ms': sample_ms, 'count': count, 'axis': axis_payload}
+
+
+def render_pvt_preview(window, payload):
+    if not payload:
+        window['PVT_PREVIEW'].update('')
+        return
+    sample_ms = payload['sample_ms']
+    count = payload['count']
+    lines = [f'Points: {count}   Sample: {sample_ms:.1f} ms   Axes: A-D']
+    header = 'Idx  ' + '  '.join([f"{ax}:deg/pul  v(deg/s)" for ax in AXIS_LETTERS[:4]])
+    lines.append(header)
+    for idx in range(count):
+        parts = [f"{idx+1:02d}"]
+        for axis_letter in AXIS_LETTERS[:4]:
+            axis_data = payload['axis'][axis_letter]
+            deg_val = axis_data['deg'][idx]
+            pulse_val = axis_data['pulses'][idx]
+            vel_val = axis_data['vel_deg'][idx]
+            parts.append(f"{axis_letter}:{deg_val:7.2f}/{pulse_val:7d} v:{vel_val:7.1f}")
+        lines.append('  '.join(parts))
+        if len(lines) >= 60:  # avoid overly tall preview
+            lines.append('...')
+            break
+    window['PVT_PREVIEW'].update('\n'.join(lines))
+
+
+def send_pvt_payload(comm, payload, window=None):
+    """Send PVT arrays for axes A-D using PT/PV/PA with uniform sample time."""
+    if comm is None:
+        raise RuntimeError('Controller communications not initialized.')
+    if getattr(comm, 'mode', None) != 'CommMode1':
+        raise RuntimeError('PVT send only supported in CommMode1 (Galil Ethernet).')
+    if not payload or not payload.get('axis'):
+        raise ValueError('No PVT payload to send.')
+    sample_ms = payload['sample_ms']
+    count = payload['count']
+    if count <= 0:
+        raise ValueError('No PVT points to send.')
+    cmds = ['ST']
+    for axis_letter in AXIS_LETTERS[:4]:
+        axis_data = payload['axis'].get(axis_letter)
+        if not axis_data:
+            continue
+        time_csv = ','.join(str(int(round(sample_ms))) for _ in range(count))
+        pos_csv = ','.join(str(int(p)) for p in axis_data['pulses'])
+        vel_csv = ','.join(str(int(v)) for v in axis_data['vel_pulses'])
+        cmds.append(f'PT{axis_letter}={time_csv}')
+        cmds.append(f'PV{axis_letter}={vel_csv}')
+        cmds.append(f'PA{axis_letter}={pos_csv}')
+    cmds.append('BGS')
+    for c in cmds:
+        result = comm.send_command(c)
+        if window and 'DEBUG_LOG' in window.AllKeysDict:
+            window['DEBUG_LOG'].print(f"[PVT_CMD] {c} -> {result}")
+        if result is False:
+            raise RuntimeError(f'Controller rejected command: {c}')
+
+
+def build_all_pvt_payload(values, window, sample_ms: float):
+    """Build PVT rows from ALL tab setpoints (axes A-D) using current hold positions when blanks/disabled."""
+    if sample_ms <= 0:
+        raise ValueError('Sample time must be positive.')
+    # Seed hold positions from last valid polled positions if available; fallback to 0
+    hold_positions = {}
+    for idx, axis_letter in enumerate(AXIS_LETTERS[:4], start=1):
+        try:
+            pos_str = window._last_valid_pos[idx - 1] if hasattr(window, '_last_valid_pos') else ''
+            hold_positions[axis_letter] = float(pos_str) if pos_str not in (None, '', '-') else 0.0
+        except Exception:
+            hold_positions[axis_letter] = 0.0
+
+    rows = []
+    step_fields = ['pos1', 'pos2', 'pos3', 'pos4', 'pos5']
+    for step_idx, pos_field in enumerate(step_fields, start=1):
+        row = []
+        any_axis = False
+        for axis_idx, axis_letter in enumerate(AXIS_LETTERS[:4], start=1):
+            enabled = bool(values.get(f'ALL_S{axis_idx}_enabled', False))
+            key = f'ALL_S{axis_idx}_{pos_field}'
+            raw = str(values.get(key, '')).strip()
+            if enabled and raw not in ('', '-', '.', '-.'):
+                try:
+                    val = float(raw)
+                    hold_positions[axis_letter] = val
+                    any_axis = True
+                except Exception:
+                    raise ValueError(f'Invalid value for Servo {axis_idx} {pos_field}: {raw}')
+            row.append(hold_positions[axis_letter])
+        if any_axis:
+            rows.append(row)
+
+    if not rows:
+        raise ValueError('No valid setpoints to send as PVT (provide pos1-pos4 for at least one of axes A-D).')
+
+    return prepare_pvt_payload(rows, sample_ms)
+
+
+# ---------------------------------------------------------------------------
+# Sequence state persistence
+# ---------------------------------------------------------------------------
+def load_sequence_state():
+    try:
+        if os.path.exists(SEQUENCE_STATE_FILE):
+            with open(SEQUENCE_STATE_FILE, 'r') as fh:
+                return json.load(fh)
+    except Exception:
+        pass
+    return {}
+
+
+def save_sequence_state_from_values(values):
+    state = {
+        'repeat': bool(values.get('ALL_REPEAT', False)),
+        'servos': {},
+        'dp_run_rows': values.get('DP_RUN_ROWS', ''),
+    }
+    for i in range(1, 9):
+        entry = {
+            'enabled': bool(values.get(f'ALL_S{i}_enabled', False)),
+            'pos1': values.get(f'ALL_S{i}_pos1', ''),
+            'pos2': values.get(f'ALL_S{i}_pos2', ''),
+            'pos3': values.get(f'ALL_S{i}_pos3', ''),
+            'pos4': values.get(f'ALL_S{i}_pos4', ''),
+            'pos5': values.get(f'ALL_S{i}_pos5', ''),
+        }
+        state['servos'][str(i)] = entry
+    try:
+        with open(SEQUENCE_STATE_FILE, 'w') as fh:
+            json.dump(state, fh)
+    except Exception:
+        pass
+
+
+def restore_sequence_state(window, state):
+    try:
+        if not state:
+            return
+        window['ALL_REPEAT'].update(value=bool(state.get('repeat', False)))
+        # Restore DP run rows if present
+        dp_rows = state.get('dp_run_rows', '')
+        if dp_rows is not None and 'DP_RUN_ROWS' in window.AllKeysDict:
+            window['DP_RUN_ROWS'].update(str(dp_rows))
+        servos = state.get('servos', {})
+        for i_str, entry in servos.items():
+            try:
+                i = int(i_str)
+            except Exception:
+                continue
+            if f'ALL_S{i}_enabled' in window.AllKeysDict:
+                window[f'ALL_S{i}_enabled'].update(value=bool(entry.get('enabled', False)))
+            for fld in ['pos1', 'pos2', 'pos3', 'pos4', 'pos5']:
+                key = f'ALL_S{i}_{fld}'
+                if key in window.AllKeysDict:
+                    val = entry.get(fld, '')
+                    window[key].update(str(val))
+    except Exception:
+        pass
 # -----------------------------
 # Servo setup:Dictionary mapping each field to its min and max values (same for all servos)
 # Automatically generate command mappings for all 8 servos
@@ -182,15 +794,29 @@ for i in range(1, 9):
 COMMAND_MAP = GALIL_COMMAND_MAP
 
 # Initialize ControllerComm with Galil config from INI file
+import os
 comm = None
+comm_h = None  # Separate comm for MyActuator axis H
 try:
     config = configparser.ConfigParser()
-    config.read('controller_config.ini')
+    ini_path = os.path.join(os.path.dirname(__file__), 'controller_config.ini')
+    print(f'[DEBUG] Reading INI file from: {ini_path}')
+    config.read(ini_path)
+    print(f'[DEBUG] Sections found: {config.sections()}')
     galil_config = dict(config.items('CommMode1')) if config.has_section('CommMode1') else {}
+    print(f'[DEBUG] galil_config: {galil_config}')
     comm = ControllerComm(mode='CommMode1', galil_config=galil_config)
     print(f'[DEBUG] ControllerComm initialized: comm={comm}, mode={getattr(comm, "mode", None)}')
+    
+    # Initialize MyActuator for Servo H if configured
+    if config.has_section('CommMode5'):
+        myactuator_config = dict(config.items('CommMode5'))
+        print(f'[DEBUG] myactuator_config: {myactuator_config}')
+        comm_h = ControllerComm(mode='CommMode5', myactuator_config=myactuator_config)
+        print(f'[DEBUG] MyActuator ControllerComm initialized for Servo H')
 except Exception as comm_error:
     comm = None
+    comm_h = None
     import traceback
     error_details = f'{comm_error}\n' + traceback.format_exc()
     sg.popup_error(f'Failed to initialize controller communications:\n{comm_error}', keep_on_top=True)
@@ -206,16 +832,40 @@ def build_servo_tab(servo_num):
     Returns:
         List: PySimpleGUI layout for the tab
     """
+    axis_letter = AXIS_LETTERS[servo_num - 1]
+    desc_default = AXIS_UNITS.get(axis_letter, {}).get('description', DEFAULT_SERVO_DESCRIPTIONS.get(servo_num, ''))
     layout = [
         [sg.Text(f'Servo {servo_num}', font=POSITION_LABEL_FONT),
          sg.Text('●', key=f'S{servo_num}_status_light', font=('Courier New', 16), text_color='gray'),
          sg.Text('Disabled', key=f'S{servo_num}_status_text', font=GLOBAL_FONT, text_color='gray')],
-        [sg.Button('Clear Faults', key=f'S{servo_num}_clear_faults', size=(14,2), font=GLOBAL_FONT)],
-        [sg.Text('Speed:', size=(18,1), font=GLOBAL_FONT),
-         sg.Input(key=f'S{servo_num}_speed', size=(10,1), font=GLOBAL_FONT, enable_events=True),
-            sg.Text('DPS ', font=GLOBAL_FONT),
-         sg.Button('⌨', key=f'S{servo_num}_speed_keypad', size=(2,1), font=GLOBAL_FONT),
-         sg.Button('OK', key=f'S{servo_num}_speed_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green'))],
+        [sg.Text('Description:', size=(18,1), font=GLOBAL_FONT),
+         sg.Input(
+             default_text=desc_default,
+             key=f'S{servo_num}_desc',
+             size=(24,1),
+             font=GLOBAL_FONT,
+             enable_events=True,
+             text_color='black',
+             background_color=DEFAULT_INPUT_BG,
+         )],
+        [
+            sg.Button('Clear Faults', key=f'S{servo_num}_clear_faults', size=(14,2), font=GLOBAL_FONT),
+            sg.Checkbox(
+                'Confirm setpoints',
+                key=f'S{servo_num}_confirm_ok',
+                default=True,
+                font=GLOBAL_FONT,
+                tooltip='When checked, show OK popup before sending setpoints.',
+            ),
+        ],
+          [sg.Text('Speed:', size=(18,1), font=GLOBAL_FONT),
+            sg.Input('10', key=f'S{servo_num}_speed', size=(10,1), font=GLOBAL_FONT, enable_events=True),
+                sg.Text('DPS ', font=GLOBAL_FONT),
+            sg.Button('⌨', key=f'S{servo_num}_speed_keypad', size=(2,1), font=GLOBAL_FONT),
+            sg.Button('OK', key=f'S{servo_num}_speed_ok', size=(4,1), font=GLOBAL_FONT, button_color=('white', 'green')),
+            sg.Text(' @mid:', font=GLOBAL_FONT, pad=((10,2),(0,0))),
+            sg.Text('—', key=f'S{servo_num}_mid_speed', size=(10,1), font=GLOBAL_FONT, text_color='blue'),
+            sg.Text('DPS', font=GLOBAL_FONT)],
         [sg.Text('Acceleration:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(key=f'S{servo_num}_accel', size=(10,1), font=GLOBAL_FONT, enable_events=True),
             sg.Text('DPS²', font=GLOBAL_FONT),
@@ -253,12 +903,70 @@ def build_servo_tab(servo_num):
     return layout
 
 
+def build_all_tab():
+    """Build the ALL tab with up to four absolute setpoints per servo and enable checkbox."""
+    rows = [
+        [
+            sg.Text('Line Speed (0-2):', size=(18, 1), font=GLOBAL_FONT),
+            sg.Input('1.0', key='ALL_LINE_SPEED', size=(6, 1), font=GLOBAL_FONT, justification='center', enable_events=True),
+        ],
+        [
+            sg.Text('PVT Sample (ms):', size=(18, 1), font=GLOBAL_FONT),
+            sg.Input('50', key='ALL_PVT_SAMPLE_MS', size=(6, 1), font=GLOBAL_FONT, justification='center'),
+        ],
+        [
+            sg.Text('Enable', size=(6, 1), font=GLOBAL_FONT, justification='center'),
+            sg.Text('Description', size=(21, 1), font=GLOBAL_FONT, justification='center'),
+            sg.Text('SPT 1(DEG)', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+            sg.Text('SPT 2(DEG)', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+            sg.Text('SPT 3(DEG)', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+            sg.Text('SPT 4(DEG)', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+            sg.Text('SPT 5(DEG)', size=(10, 1), font=GLOBAL_FONT, justification='center')
+        ]
+    ]
+    rows.append([
+        sg.Text('', size=(6, 1), font=GLOBAL_FONT),
+        sg.Text('Cycle Time (s)', size=(21, 1), font=GLOBAL_FONT, justification='center'),
+        sg.Text('—', key='ALL_STEP1_TIME', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+        sg.Text('—', key='ALL_STEP2_TIME', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+        sg.Text('—', key='ALL_STEP3_TIME', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+        sg.Text('—', key='ALL_STEP4_TIME', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+        sg.Text('—', key='ALL_STEP5_TIME', size=(10, 1), font=GLOBAL_FONT, justification='center'),
+    ])
+    for i in range(1, 9):
+        axis_letter = AXIS_LETTERS[i - 1]
+        desc_default = AXIS_UNITS.get(axis_letter, {}).get('description', DEFAULT_SERVO_DESCRIPTIONS.get(i, ''))
+        rows.append([
+            sg.Checkbox(f'Servo {i}', key=f'ALL_S{i}_enabled', default=True, font=GLOBAL_FONT, pad=((0,4),0)),
+            sg.Text(desc_default, key=f'ALL_S{i}_desc', size=(18, 1), font=GLOBAL_FONT, pad=((0,4),0)),
+            sg.Input(key=f'ALL_S{i}_pos1', size=(10, 1), font=GLOBAL_FONT, enable_events=True, justification='center'),
+            sg.Input(key=f'ALL_S{i}_pos2', size=(10, 1), font=GLOBAL_FONT, enable_events=True, justification='center'),
+            sg.Input(key=f'ALL_S{i}_pos3', size=(10, 1), font=GLOBAL_FONT, enable_events=True, justification='center'),
+            sg.Input(key=f'ALL_S{i}_pos4', size=(10, 1), font=GLOBAL_FONT, enable_events=True, justification='center'),
+            sg.Input(key=f'ALL_S{i}_pos5', size=(10, 1), font=GLOBAL_FONT, enable_events=True, justification='center'),
+        ])
+    rows.append([
+        sg.Button('Run Sequence', key='ALL_RUN_SEQUENCE', size=(14, 2), font=GLOBAL_FONT, button_color=('white', 'green')),
+        sg.Button('Stop Sequence', key='ALL_STOP_SEQUENCE', size=(14, 2), font=GLOBAL_FONT, button_color=('white', 'red'), disabled=True),
+        sg.Checkbox('Repeat', key='ALL_REPEAT', default=False, font=GLOBAL_FONT)
+    ])
+    rows.append([
+        sg.Button('Send as PVT', key='ALL_PVT_SEND', size=(14, 2), font=GLOBAL_FONT, button_color=('white', '#007ACC')),
+        sg.Text('', key='ALL_PVT_STATUS', size=(40, 1), font=GLOBAL_FONT),
+    ])
+    return rows
+
+
 
 # Create a tab for each servo (1-8)
 # -----------------------------
 # Build tab group for all servos
 # -----------------------------
-servo_tabs = [sg.Tab(f'Servo {i}', build_servo_tab(i), key=f'TAB{i}') for i in range(1, 9)]
+TAB_PAD = ((6, 6), (0, 0))  # consistent tab header padding
+servo_tabs = [sg.Tab(f'Servo {i}', build_servo_tab(i), key=f'TAB{i}', pad=TAB_PAD) for i in range(1, 9)]
+servo_tabs.append(sg.Tab(' ALL ', build_all_tab(), key='TABALL', pad=TAB_PAD))
+servo_tabs.append(sg.Tab(' DataPipe ', build_datapipe_tab(os.path.join(os.path.dirname(__file__), 'MatlabData5.xlsx')), key='TABDP', pad=TAB_PAD))
+servo_tabs.append(sg.Tab(' PVT ', build_pvt_tab(os.path.join(os.path.dirname(__file__), 'pvt_points.csv')), key='TABPVT', pad=TAB_PAD))
 
 
 
@@ -269,12 +977,81 @@ servo_tabs = [sg.Tab(f'Servo {i}', build_servo_tab(i), key=f'TAB{i}') for i in r
 
 # Default numeric limits for fields (used if not found in AXIS_UNITS)
 NUMERIC_LIMITS = {
-    'speed': (-180, 180),
+    # Allow 0–360 deg/sec for speed; direction is handled by command sign
+    'speed': (0, 360),
     'accel': (0, 180),
     'decel': (0, 180),
     'abs_pos': (0, 180),
     'rel_pos': (-90, 90),
 }
+
+
+def get_limits(axis_letter: str, field: str):
+    """Return (min, max) for a field, preferring axis-specific overrides."""
+    axis_cfg = AXIS_UNITS.get(axis_letter, {})
+    default_min, default_max = NUMERIC_LIMITS.get(field, (None, None))
+    if field in ('abs_pos', 'rel_pos'):
+        custom_min = axis_cfg.get('min')
+        custom_max = axis_cfg.get('max')
+    else:
+        custom_min = axis_cfg.get(f'{field}_min')
+        custom_max = axis_cfg.get(f'{field}_max')
+    min_val = custom_min if custom_min is not None else default_min
+    max_val = custom_max if custom_max is not None else default_max
+    return min_val, max_val
+
+
+def compute_midpoint_speed(speed: float, accel: float, decel: float, mid_distance: float) -> float | None:
+    """Estimate speed achievable at the midpoint of a move.
+
+    Uses a trapezoidal/triangular heuristic: the achievable speed at midpoint is limited by
+    commanded speed and by accel/decel over the available distance to halfway.
+    """
+    try:
+        if any(v is None for v in [speed, accel, decel]):
+            return None
+        speed = max(0.0, float(speed))
+        accel = max(0.0, float(accel))
+        decel = max(0.0, float(decel))
+        mid_distance = max(0.0, float(mid_distance))
+        if mid_distance == 0 or accel == 0 or decel == 0:
+            return 0.0
+        limit_accel = (2 * accel * mid_distance) ** 0.5
+        limit_decel = (2 * decel * mid_distance) ** 0.5
+        return min(speed, limit_accel, limit_decel)
+    except Exception:
+        return None
+
+
+def update_mid_speed_display(window, servo_num: int):
+    """Update the displayed midpoint speed estimate for a servo."""
+    try:
+        axis_letter = AXIS_LETTERS[servo_num - 1]
+        axis_cfg = AXIS_UNITS.get(axis_letter, {})
+        axis_range = (axis_cfg.get('max', 180.0) - axis_cfg.get('min', 0.0))
+        # Use half of axis range but cap at 90 deg as requested
+        mid_distance = max(0.0, min(90.0, axis_range / 2.0))
+        def _parse(key):
+            val = window[key].get() if key in window.AllKeysDict else None
+            try:
+                return float(val)
+            except Exception:
+                return None
+        speed = _parse(f'S{servo_num}_speed')
+        accel = _parse(f'S{servo_num}_accel')
+        decel = _parse(f'S{servo_num}_decel')
+        mid_speed = compute_midpoint_speed(speed, accel, decel, mid_distance)
+        display_key = f'S{servo_num}_mid_speed'
+        if display_key in window.AllKeysDict:
+            if mid_speed is None:
+                window[display_key].update('—')
+            else:
+                window[display_key].update(f"{format_display_value(mid_speed)} DPS")
+    except Exception:
+        try:
+            window[f'S{servo_num}_mid_speed'].update('—')
+        except Exception:
+            pass
 
 # -----------------------------
 # Main window layout
@@ -285,6 +1062,12 @@ for i in range(1, 9):
     for field in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']:
         NUMERIC_INPUT_KEYS.append(f'S{i}_{field}')
         NUMERIC_KEYPAD_BUTTONS.append(f'S{i}_{field}_keypad')
+    for pos_field in ['pos1', 'pos2', 'pos3', 'pos4', 'pos5']:
+        NUMERIC_INPUT_KEYS.append(f'ALL_S{i}_{pos_field}')
+
+# DataPipe helpers tracked on window
+DP_SEGMENTS_KEY = '_dp_segments'
+DP_TIME_KEY = '_dp_time_ms'
 
 ###############################################################################
 # GUI Layout
@@ -292,21 +1075,55 @@ for i in range(1, 9):
 # Make DEBUG_LOG Multiline write-only so updates render but user can't edit
 layout = [
     [
-        sg.TabGroup([servo_tabs], key='TABGROUP', enable_events=True),
-        sg.Push(),
-        sg.Checkbox('Show Poll Logs', key='SHOW_POLL_LOGS', enable_events=True, default=False, font=GLOBAL_FONT),
-        sg.Button('Shutdown', key='SHUTDOWN', size=(8,1), button_color=('white', 'red'), font=GLOBAL_FONT)
+        sg.TabGroup([servo_tabs], key='TABGROUP', enable_events=True, expand_x=True, expand_y=True)
     ],
-    [sg.Multiline('', key='DEBUG_LOG', size=(80, 8), font=('Courier New', 9), autoscroll=True, disabled=False, write_only=True, text_color='black', border_width=0)],
+    [
+        sg.Column(
+            [[sg.Multiline('', key='DEBUG_LOG', size=(55, 8), font=('Courier New', 9), autoscroll=True, disabled=False, write_only=True, text_color='black', border_width=0)]],
+            expand_x=True,
+            expand_y=True,
+        ),
+        sg.Column(
+            [
+                [
+                    sg.Checkbox('Show Poll Logs', key='SHOW_POLL_LOGS', enable_events=True, default=False, font=GLOBAL_FONT),
+                    sg.Button('Shutdown', key='SHUTDOWN', size=(10,2), button_color=('white', 'red'), font=GLOBAL_FONT),
+                    sg.Button('E-STOP', key='ESTOP', size=(10,2), button_color=('white', '#C00000'), font=('Courier New', 10, 'bold'))
+                ]
+            ],
+            element_justification='right',
+            pad=((10,0), (0,0)),
+            vertical_alignment='top'
+        )
+    ]
 ]
 
-window = sg.Window("Controller GUI", layout, size=(700, 480), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True)
+window = sg.Window("Controller GUI", layout, size=(800, 540), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True, resizable=True)
+
+# Enforce description field colors after window creation
+_refresh_description_colors(window)
+
+# Restore saved ALL tab sequence state (repeat flag, enable flags, setpoints)
+restore_sequence_state(window, load_sequence_state())
 
 ###############################################################################
 # Show popup if communications not initialized
 ###############################################################################
 if comm is None:
     sg.popup_error('Controller communications not initialized. Check INI file and hardware connection.', keep_on_top=True)
+
+def get_comm_for_axis(axis_letter):
+    """Return the appropriate comm object for the given axis."""
+    if axis_letter == 'H' and comm_h is not None:
+        return comm_h
+    return comm
+
+def send_axis_command(axis_letter, cmd):
+    """Send command to the appropriate controller based on axis."""
+    controller = get_comm_for_axis(axis_letter)
+    if controller is None:
+        return False
+    return controller.send_command(cmd)
 
 window_closed = False
 import time
@@ -317,6 +1134,9 @@ def initialize_setpoints_from_controller(window, comm):
     """Query controller for current setpoints/status and seed GUI fields."""
     if not comm:
         return
+    # Ensure tracking structure exists even if controller queries fail
+    if not hasattr(window, '_last_setpoints') or not window._last_setpoints or len(window._last_setpoints) != 8:
+        window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']} for _ in range(8)]
     try:
         mode = getattr(comm, 'mode', None)
     except Exception:
@@ -354,14 +1174,20 @@ def initialize_setpoints_from_controller(window, comm):
         # Update numeric fields (convert pulses to degrees)
         for field in ['speed', 'accel', 'decel', 'abs_pos']:
             if field not in results:
+                # Set default value of 0 for abs_pos if not queried
+                if field == 'abs_pos':
+                    window[f'S{servo_num}_{field}'].update('0')
+                    window._last_setpoints[servo_num - 1][field] = 0
                 continue
             raw = results[field]
             val_deg = raw / denom if field in ['speed', 'accel', 'decel', 'abs_pos'] else raw
+            # Clamp to configured min/max for safety on seed
+            min_val, max_val = get_limits(axis_letter, field)
+            if min_val is not None and max_val is not None:
+                val_deg = max(min_val, min(max_val, val_deg))
             formatted = format_display_value(val_deg)
             window[f'S{servo_num}_{field}'].update(formatted)
             # Track last setpoints for cancel restore
-            if not hasattr(window, '_last_setpoints'):
-                window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']} for _ in range(8)]
             window._last_setpoints[servo_num - 1][field] = val_deg
         # Relative position has no direct query; reset to 0
         window[f'S{servo_num}_rel_pos'].update('0')
@@ -378,6 +1204,7 @@ def initialize_setpoints_from_controller(window, comm):
                 window[f'S{servo_num}_status_text'].update('Disabled', text_color='#FFFF00')
         if not window_closed:
             window['DEBUG_LOG'].print(f'[INIT] S{servo_num} seeded from controller: {results}')
+        update_mid_speed_display(window, servo_num)
 
 
 def update_setpoint_highlight(window, servo_num, actual_deg=None, tolerance=0.1):
@@ -413,6 +1240,227 @@ bind_jog_press_release(window)
 
 # Seed GUI setpoints/status from controller before starting polling
 initialize_setpoints_from_controller(window, comm)
+
+
+def render_datapipe_preview(window, segments):
+    """Render DataPipe segments into the preview box."""
+    if not segments:
+        window['DP_PREVIEW'].update('')
+        return
+    lines = []
+    lines.append('Idx  Time(ms)   Axis1(deg/pulses)  Axis2  Axis3  Axis4  Axis5')
+    for idx, seg in enumerate(segments, start=1):
+        line_parts = [f"{idx:02d}   {seg['time_ms']:7.1f}"]
+        for axis_idx, axis_letter in enumerate(['A','B','C','D','E'], start=1):
+            axis_data = seg['converted'][axis_idx - 1]
+            line_parts.append(f" {axis_data['deg']:7.2f}/{axis_data['pulses']:7d}")
+        lines.append('  '.join(line_parts))
+    window['DP_PREVIEW'].update('\n'.join(lines))
+
+
+def prepare_datapipe_segments(raw_segments):
+    """Clamp degrees and convert to pulses for A-E."""
+    prepared = []
+    for seg in raw_segments:
+        converted = []
+        for axis_idx in range(1, 6):
+            axis_letter = _axis_letter_for_index(axis_idx)
+            converted.append(_clamp_and_convert_deg_to_pulses(axis_letter, seg['axis_deg'][axis_idx - 1]))
+        prepared.append({
+            'time_ms': seg['time_ms'],
+            'axis_deg': seg['axis_deg'],
+            'converted': converted,
+        })
+    return prepared
+
+
+def send_datapipe_contour(comm, segments, window=None):
+    """Send contour data using CD/DT (uniform time) to Galil. Uses first time_ms for DT."""
+    if comm is None:
+        raise RuntimeError('Controller communications not initialized.')
+    if not segments:
+        raise ValueError('No segments to send.')
+    if getattr(comm, 'mode', None) != 'CommMode1':
+        raise RuntimeError('DataPipe send only supported in CommMode1 (Galil Ethernet).')
+    time_ms = segments[0]['time_ms']
+    if time_ms <= 0:
+        raise ValueError(f'Invalid DT (must be >0 ms); got {time_ms}. Check first row time values.')
+    dt_val = max(1, int(round(time_ms)))
+    cmds = []
+    axis_mask = ''.join(['A','B','C','D','E'])
+    cmds.append('ST')  # stop before loading
+    cmds.append('CM {}'.format(axis_mask))  # enable contour mode on axes A-E
+    cmds.append('DT={}'.format(dt_val))
+    # Build incremental deltas in pulses
+    prev_pulses = [0,0,0,0,0]
+    for seg in segments:
+        # If time differs, warn by using first time_ms; per-axis time not supported here
+        deltas = []
+        for axis_idx in range(5):
+            pulses = seg['converted'][axis_idx]['pulses']
+            delta = pulses - prev_pulses[axis_idx]
+            deltas.append(delta)
+            prev_pulses[axis_idx] = pulses
+        cmds.append('CD {}'.format(','.join(str(d) for d in deltas)))
+    cmds.append('CD 0,0,0,0,0=0')  # terminate contour buffer
+    cmds.append('BGS')
+    # Send commands sequentially to avoid overrun
+    for c in cmds:
+        result = comm.send_command(c)
+        if window and 'DEBUG_LOG' in window.AllKeysDict:
+            window['DEBUG_LOG'].print(f"[DP_CMD] {c} -> {result}")
+        if result is False:
+            tc1 = None
+            try:
+                tc1 = comm.gclib.GCommand('TC1') if hasattr(comm, 'gclib') else None
+            except Exception:
+                tc1 = None
+            detail = f' (TC1={tc1.strip()})' if tc1 else ''
+            raise RuntimeError(f'Controller rejected command: {c}{detail}')
+
+
+def send_datapipe_pr(comm, segments, window=None, line_speed: float = 1.0, values=None, max_rows=None, stop_event=None):
+    """Send DataPipe segments as sequential PR moves (axes A-E) for step/dir setups.
+
+    If values are provided, SP/AC/DC are set per axis using current tab entries scaled by line_speed.
+    """
+    if comm is None:
+        raise RuntimeError('Controller communications not initialized.')
+    if not segments:
+        raise ValueError('No segments to send.')
+    if getattr(comm, 'mode', None) != 'CommMode1':
+        raise RuntimeError('DataPipe PR send only supported in CommMode1 (Galil Ethernet).')
+
+    cmds = []
+    cmds.append('ST')  # stop before loading
+
+    if values is not None:
+        for axis_idx in range(5):
+            servo_num = axis_idx + 1
+            axis_letter = _axis_letter_for_index(servo_num)
+            speed_key = f'S{servo_num}_speed'
+            accel_key = f'S{servo_num}_accel'
+            decel_key = f'S{servo_num}_decel'
+            try:
+                base_speed = float(values.get(speed_key, ''))
+                base_accel = float(values.get(accel_key, ''))
+                base_decel = float(values.get(decel_key, ''))
+            except Exception:
+                continue
+            scaled_speed = base_speed * line_speed
+            scaled_accel = base_accel * line_speed
+            scaled_decel = base_decel * line_speed
+            min_spd, max_spd = get_limits(axis_letter, 'speed')
+            min_ac, max_ac = get_limits(axis_letter, 'accel')
+            min_dc, max_dc = get_limits(axis_letter, 'decel')
+            if min_spd is not None:
+                scaled_speed = max(min_spd, scaled_speed)
+            if max_spd is not None:
+                scaled_speed = min(max_spd, scaled_speed)
+            if min_ac is not None:
+                scaled_accel = max(min_ac, scaled_accel)
+            if max_ac is not None:
+                scaled_accel = min(max_ac, scaled_accel)
+            if min_dc is not None:
+                scaled_decel = max(min_dc, scaled_decel)
+            if max_dc is not None:
+                scaled_decel = min(max_dc, scaled_decel)
+            axis_units = AXIS_UNITS.get(axis_letter, {})
+            scaling = axis_units.get('scaling', 1) or 1
+            gearbox = axis_units.get('gearbox', 1) or 1
+            pulses_speed = int(round(scaled_speed * scaling * gearbox))
+            pulses_accel = int(round(scaled_accel * scaling * gearbox))
+            pulses_decel = int(round(scaled_decel * scaling * gearbox))
+            cmds.append(f"SP{axis_letter}={pulses_speed}")
+            cmds.append(f"AC{axis_letter}={pulses_accel}")
+            cmds.append(f"DC{axis_letter}={pulses_decel}")
+    use_segments = segments[:max_rows] if (max_rows is not None and max_rows > 0) else segments
+    # Seed deltas from current actual positions (pulses) so PR deltas are relative to where the axes are now
+    prev_pulses = [0, 0, 0, 0, 0]
+    try:
+        for axis_idx in range(5):
+            axis_letter = _axis_letter_for_index(axis_idx + 1)
+            resp = comm.send_command(f"MG _RP{axis_letter}")
+            if isinstance(resp, str):
+                for line in resp.splitlines():
+                    try:
+                        prev_pulses[axis_idx] = int(float(line.strip()))
+                        break
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    total_steps = len(use_segments)
+    for seg_idx, seg in enumerate(use_segments, start=1):
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError('PR send canceled.')
+        deltas = []
+        for axis_idx in range(5):
+            pulses = seg['converted'][axis_idx]['pulses']
+            delta = pulses - prev_pulses[axis_idx]
+            deltas.append(delta)
+            prev_pulses[axis_idx] = pulses
+        if all(d == 0 for d in deltas):
+            continue  # nothing to do for this segment
+        pr_cmd = 'PR {}'.format(','.join(str(d) for d in deltas))
+        cmds.append(pr_cmd)
+        cmds.append('BG ABCDE')
+        cmds.append('AM ABCDE')
+        if window and 'DP_STATUS' in window.AllKeysDict:
+            try:
+                window.write_event_value('DP_PR_PROGRESS', (seg_idx, total_steps))
+            except Exception:
+                pass
+
+    if len(cmds) == 1:  # only ST
+        raise ValueError('All DataPipe segments were zero after conversion; nothing to send.')
+
+    for c in cmds:
+        result = comm.send_command(c)
+        if window and 'DEBUG_LOG' in window.AllKeysDict:
+            window['DEBUG_LOG'].print(f"[DP_PR_CMD] {c} -> {result}")
+        if result is False:
+            tc1 = None
+            try:
+                tc1 = comm.gclib.GCommand('TC1') if hasattr(comm, 'gclib') else None
+            except Exception:
+                tc1 = None
+            detail = f' (TC1={tc1.strip()})' if tc1 else ''
+            raise RuntimeError(f'Controller rejected command: {c}{detail}')
+        # Extra safety: wait until axes A-E report idle after AM to avoid PR while running (TC1=7)
+        if isinstance(c, str) and c.strip().upper().startswith('AM'):
+            try:
+                axes_to_check = ['A','B','C','D','E']
+                import time
+                end_time = time.time() + 15.0
+                poll_interval = 0.015  # 15 ms for faster PR sequence
+                while time.time() < end_time:
+                    if stop_event is not None and stop_event.is_set():
+                        raise RuntimeError('PR send canceled.')
+                    busy = False
+                    for ax in axes_to_check:
+                        try:
+                            bg_resp = comm.send_command(f"MG _BG{ax}")
+                            if isinstance(bg_resp, str):
+                                for line in bg_resp.splitlines():
+                                    line = line.strip()
+                                    try:
+                                        if float(line) != 0.0:
+                                            busy = True
+                                            break
+                                    except Exception:
+                                        continue
+                            if busy:
+                                break
+                        except Exception:
+                            pass
+                    if not busy:
+                        break
+                    time.sleep(poll_interval)
+            except Exception:
+                pass
+
 
 
 # --- Define handle_servo_event before main event loop ---
@@ -456,11 +1504,7 @@ def handle_servo_event(event, values):
                     print('[DEBUG] RETURN: Invalid value')
                     return
                 axis_letter = AXIS_LETTERS[servo_num - 1]
-                if axis_letter in AXIS_UNITS and field in AXIS_UNITS[axis_letter]:
-                    min_val = AXIS_UNITS[axis_letter]['min']
-                    max_val = AXIS_UNITS[axis_letter]['max']
-                else:
-                    min_val, max_val = NUMERIC_LIMITS.get(field, (0, 54000))
+                min_val, max_val = get_limits(axis_letter, field)
                 # For relative moves, ensure resulting position stays within limits
                 if field == 'rel_pos':
                     try:
@@ -477,13 +1521,16 @@ def handle_servo_event(event, values):
                     sg.popup_error(f"Value for {field} must be between {min_val} and {max_val}", keep_on_top=True)
                     print('[DEBUG] RETURN: Value out of range')
                     return
-                # Confirm with user before sending command
+                # Confirm with user before sending command (optional per tab)
+                confirm_required = bool(values.get(f'S{servo_num}_confirm_ok', True))
                 confirm_label = field.replace('_', ' ').title()
-                confirm = sg.popup_ok_cancel(
-                    f"Send setpoint for {confirm_label} (S{servo_num})?\nValue: {formatted_value}",
-                    keep_on_top=True,
-                    title='Confirm Setpoint'
-                )
+                confirm = 'OK'
+                if confirm_required:
+                    confirm = sg.popup_ok_cancel(
+                        f"Send setpoint for {confirm_label} (S{servo_num})?\nValue: {formatted_value}",
+                        keep_on_top=True,
+                        title='Confirm Setpoint'
+                    )
                 if confirm != 'OK':
                     restore_val = previous_setpoint if previous_setpoint is not None else original_text
                     window[f'S{servo_num}_{field}'].update(format_display_value(restore_val) if restore_val not in (None, '') else '')
@@ -510,12 +1557,13 @@ def handle_servo_event(event, values):
                 if not cmd:
                     print('[DEBUG] RETURN: cmd is None')
                     return
-                if not comm:
-                    print('[DEBUG] RETURN: comm is None')
+                controller = get_comm_for_axis(axis_letter)
+                if not controller:
+                    print('[DEBUG] RETURN: controller is None')
                     sg.popup_error('Controller communications not initialized.', keep_on_top=True)
                     return
                 try:
-                    response = comm.send_command(cmd)
+                    response = send_axis_command(axis_letter, cmd)
                     print(f'[DEBUG] Setpoint command sent, response: {response}')
                     if not window_closed:
                         log_line = f"[TEST LOG] {field.capitalize()} OK for S{servo_num}: Sent {cmd}\nReply: {response}\n"
@@ -525,10 +1573,17 @@ def handle_servo_event(event, values):
                         window.refresh()
                     # Persist last confirmed setpoint value for cancel restores
                     window._last_setpoints[servo_num - 1][field] = value
+                    # Track command type for Start Motion safety
                     if field == 'abs_pos':
+                        LAST_MOTION_COMMAND[servo_num - 1] = 'abs'
                         update_setpoint_highlight(window, servo_num)
+                    elif field == 'rel_pos':
+                        LAST_MOTION_COMMAND[servo_num - 1] = 'rel'
+                        set_pending_highlight(window, servo_num, field)
                     else:
                         set_pending_highlight(window, servo_num, field)
+                    if field in ('speed', 'accel', 'decel'):
+                        update_mid_speed_display(window, servo_num)
                 except Exception as e:
                     import traceback
                     error_details = f'{e}\n' + traceback.format_exc()
@@ -565,7 +1620,7 @@ def handle_servo_event(event, values):
                             return
                         # Allow jogging below min but cap speed to 20% of max speed
                         if speed_val < 0 and current_pos <= min_val:
-                            max_speed_limit = NUMERIC_LIMITS.get('speed', (0, 180))[1]
+                            max_speed_limit = get_limits(axis_letter, 'speed')[1]
                             capped = -min(abs(speed_val), max_speed_limit * 0.1)
                             speed_val = capped
                     # Convert degrees/sec to pulses/sec using scaling and gearbox
@@ -578,13 +1633,32 @@ def handle_servo_event(event, values):
                         cmd = cmd_func(speed_val)
                     else:
                         cmd = cmd_func
-                case 'enable' | 'disable' | 'start' | 'stop':
+                    LAST_MOTION_COMMAND[servo_num - 1] = 'jog'
+                case 'start':
+                    # SAFETY: Block Start Motion if no valid position command was set
+                    last_cmd = LAST_MOTION_COMMAND[servo_num - 1]
+                    if last_cmd not in ('abs', 'rel'):
+                        sg.popup_error(
+                            f'Start Motion blocked for safety.\n\n'
+                            f'You must set an Absolute or Relative position\n'
+                            f'before using Start Motion.\n\n'
+                            f'Current state: {last_cmd or "no position set"}',
+                            keep_on_top=True,
+                            title='Safety Block'
+                        )
+                        return
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
+                case 'enable' | 'disable' | 'stop':
+                    cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
+                    if action == 'stop':
+                        # Clear motion command tracking on stop
+                        LAST_MOTION_COMMAND[servo_num - 1] = None
                 case _:
                     # For any other actions, fallback to original logic if needed
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
             if cmd:
-                if comm:
+                controller = get_comm_for_axis(axis_letter)
+                if controller:
                     try:
                         # If disabling, send stop command first
                         if action == 'disable':
@@ -592,8 +1666,8 @@ def handle_servo_event(event, values):
                             stop_cmd = COMMAND_MAP.get(stop_key)
                             if stop_cmd:
                                 stop_cmd_val = stop_cmd if not callable(stop_cmd) else stop_cmd()
-                                comm.send_command(stop_cmd_val)
-                        response = comm.send_command(cmd)
+                                send_axis_command(axis_letter, stop_cmd_val)
+                        response = send_axis_command(axis_letter, cmd)
                         # Log request and reply in DEBUG_LOG for all actions
                         if not window_closed:
                             prev_log = window['DEBUG_LOG'].get()
@@ -619,15 +1693,240 @@ def handle_servo_event(event, values):
             return
 
 
-def handle_jog_press(window, comm, servo_num, direction, is_press, values):
-    """Start jog on press and stop on release for Jog CW/CCW buttons."""
+def handle_all_tab_event(window, event, values):
+    """Legacy placeholder: per-row OKs removed."""
+    return False
+
+
+def wait_for_axis_complete(comm, axis_letter, timeout=15.0, poll_interval=0.1, stop_event=None):
+    """Poll _BG<axis> until motion complete or timeout; stop_event is ignored for graceful finishes."""
+    import time
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            resp = comm.send_command(f'MG _BG{axis_letter}')
+            if resp is None:
+                time.sleep(poll_interval)
+                continue
+            try:
+                val = float(str(resp).strip())
+            except Exception:
+                val = 1.0
+            if val == 0:
+                return True
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    return False
+
+
+def handle_all_run_sequence(window, comm, values):
+    """Start sequence run in background; supports optional repeat until stopped."""
+    global SEQ_THREAD, SEQ_STOP_EVENT, SEQ_RUNNING
+
     if comm is None:
-        print('[DEBUG] No comm object; cannot jog')
+        sg.popup_error('Controller communications not initialized.', keep_on_top=True)
         return
+    if SEQ_RUNNING:
+        sg.popup_error('Sequence already running. Stop it before starting again.', keep_on_top=True)
+        return
+
+    selected = []
+    for i, axis_letter in enumerate(AXIS_LETTERS, start=1):
+        if not values.get(f'ALL_S{i}_enabled', False):
+            continue
+        setpoints = []
+        for pos_field in ['pos1', 'pos2', 'pos3', 'pos4', 'pos5']:
+            key = f'ALL_S{i}_{pos_field}'
+            raw = str(values.get(key, '')).strip()
+            if raw in ('', '-', '.', '-.'):
+                setpoints.append(None)
+                continue
+            try:
+                setpoints.append(float(raw))
+            except ValueError:
+                sg.popup_error(f'Invalid setpoint for Servo {i} {pos_field}: {raw}', keep_on_top=True)
+                return
+        if any(sp is not None for sp in setpoints):
+            axis_units = AXIS_UNITS.get(axis_letter, {})
+            selected.append({
+                'servo_num': i,
+                'axis_letter': axis_letter,
+                'setpoints': setpoints,
+                'min': axis_units.get('min', NUMERIC_LIMITS['abs_pos'][0]),
+                'max': axis_units.get('max', NUMERIC_LIMITS['abs_pos'][1]),
+                'scaling': axis_units.get('scaling', 1) or 1,
+                'gearbox': axis_units.get('gearbox', 1) or 1,
+            })
+
+    if not selected:
+        sg.popup_error('No enabled servos with setpoints to run.', keep_on_top=True)
+        return
+
+    for entry in selected:
+        for idx, sp in enumerate(entry['setpoints'], start=1):
+            if sp is None:
+                continue
+            if sp < entry['min'] or sp > entry['max']:
+                sg.popup_error(f"Servo {entry['servo_num']} setpoint {idx} out of range ({entry['min']} to {entry['max']}).", keep_on_top=True)
+                return
+
+    # Validate line speed (0-2)
+    try:
+        line_speed = float(str(values.get('ALL_LINE_SPEED', '1')).strip() or '1')
+    except Exception:
+        sg.popup_error('Invalid Line Speed. Enter a number between 0 and 2.', keep_on_top=True)
+        return
+    if line_speed < 0 or line_speed > 2:
+        sg.popup_error('Line Speed must be between 0 and 2.', keep_on_top=True)
+        return
+
+    repeat_flag = bool(values.get('ALL_REPEAT', False))
+    # Persist sequence inputs for next launch
+    save_sequence_state_from_values(values)
+    # Reset displayed step times
+    for idx in range(1, 6):
+        key = f'ALL_STEP{idx}_TIME'
+        if key in window.AllKeysDict:
+            window[key].update('—')
+    SEQ_STOP_EVENT = threading.Event()
+    SEQ_RUNNING = True
+    if 'ALL_STOP_SEQUENCE' in window.AllKeysDict:
+        window['ALL_STOP_SEQUENCE'].update(disabled=False)
+    if 'ALL_RUN_SEQUENCE' in window.AllKeysDict:
+        window['ALL_RUN_SEQUENCE'].update(disabled=True)
+
+    def seq_log(msg):
+        try:
+            window.write_event_value('ALL_SEQ_LOG', msg)
+        except Exception:
+            pass
+
+    def run_once():
+        import time
+        if SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set():
+            return False
+        for idx in range(len(selected[0]['setpoints'])):  # all setpoints (now 4)
+            if SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set():
+                return False
+            step_start = time.perf_counter()
+            sent_axes = []
+            for entry in selected:
+                sp = entry['setpoints'][idx]
+                if sp is None:
+                    continue
+                # Fetch and scale speed using Line Speed multiplier
+                speed_key = f"S{entry['servo_num']}_speed"
+                speed_str = values.get(speed_key, '')
+                if speed_str in ('', '-', '.'):  # require a speed
+                    window.write_event_value('ALL_SEQ_ERROR', f"Missing speed for Servo {entry['servo_num']} (tab speed field).")
+                    return False
+                try:
+                    base_speed = float(speed_str)
+                except Exception:
+                    window.write_event_value('ALL_SEQ_ERROR', f"Invalid speed for Servo {entry['servo_num']}: {speed_str}")
+                    return False
+                scaled_speed = base_speed * line_speed
+                min_spd, max_spd = get_limits(entry['axis_letter'], 'speed')
+                if min_spd is not None:
+                    scaled_speed = max(min_spd, scaled_speed)
+                if max_spd is not None:
+                    scaled_speed = min(max_spd, scaled_speed)
+
+                # Fetch and scale accel/decel using Line Speed multiplier
+                accel_key = f"S{entry['servo_num']}_accel"
+                decel_key = f"S{entry['servo_num']}_decel"
+                accel_str = values.get(accel_key, '')
+                decel_str = values.get(decel_key, '')
+                try:
+                    base_accel = float(accel_str)
+                    base_decel = float(decel_str)
+                except Exception:
+                    window.write_event_value('ALL_SEQ_ERROR', f"Invalid accel/decel for Servo {entry['servo_num']} (check tab fields).")
+                    return False
+                scaled_accel = base_accel * line_speed
+                scaled_decel = base_decel * line_speed
+                min_ac, max_ac = get_limits(entry['axis_letter'], 'accel')
+                min_dc, max_dc = get_limits(entry['axis_letter'], 'decel')
+                if min_ac is not None:
+                    scaled_accel = max(min_ac, scaled_accel)
+                if max_ac is not None:
+                    scaled_accel = min(max_ac, scaled_accel)
+                if min_dc is not None:
+                    scaled_decel = max(min_dc, scaled_decel)
+                if max_dc is not None:
+                    scaled_decel = min(max_dc, scaled_decel)
+
+                pulses_speed = int(round(scaled_speed * entry['scaling'] * entry['gearbox']))
+                pulses_accel = int(round(scaled_accel * entry['scaling'] * entry['gearbox']))
+                pulses_decel = int(round(scaled_decel * entry['scaling'] * entry['gearbox']))
+                # Send speed/accel/decel before position
+                try:
+                    comm.send_command(f"SP{entry['axis_letter']}={pulses_speed}")
+                    comm.send_command(f"AC{entry['axis_letter']}={pulses_accel}")
+                    comm.send_command(f"DC{entry['axis_letter']}={pulses_decel}")
+                except Exception as ex:
+                    window.write_event_value('ALL_SEQ_ERROR', f"Error sending speed/accel/decel for Servo {entry['servo_num']}: {ex}")
+                    return False
+                pulses_value = int(round(sp * entry['scaling'] * entry['gearbox']))
+                cmd = f"PA{entry['axis_letter']}={pulses_value};BG{entry['axis_letter']}"
+                try:
+                    resp = comm.send_command(cmd)
+                    sent_axes.append((entry['servo_num'], entry['axis_letter']))
+                    seq_log(f"[SEQ] S{entry['servo_num']} Setpoint {idx+1}: Sent {cmd} -> {resp}")
+                except Exception as ex:
+                    window.write_event_value('ALL_SEQ_ERROR', f"Error sending setpoint {idx+1} for Servo {entry['servo_num']}: {ex}")
+                    return False
+            for servo_num, axis_letter in sent_axes:
+                if SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set():
+                    return False
+                if not wait_for_axis_complete(comm, axis_letter):
+                    window.write_event_value('ALL_SEQ_ERROR', f'Servo {servo_num} did not complete setpoint {idx+1} in time.')
+                    return False
+            step_elapsed = time.perf_counter() - step_start
+            try:
+                window.write_event_value('ALL_STEP_TIME', (idx + 1, step_elapsed))
+            except Exception:
+                pass
+        return True
+
+    def worker():
+        status = 'completed'
+        try:
+            while True:
+                if SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set():
+                    status = 'stopped'
+                    break
+                ok = run_once()
+                if not ok:
+                    status = 'stopped' if SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set() else 'failed'
+                    break
+                if not repeat_flag or (SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set()):
+                    break
+            if SEQ_STOP_EVENT is not None and SEQ_STOP_EVENT.is_set() and status == 'completed' and repeat_flag:
+                status = 'stopped'
+        except Exception as ex:
+            status = f'error: {ex}'
+            window.write_event_value('ALL_SEQ_ERROR', f'Sequence error: {ex}')
+        finally:
+            window.write_event_value('ALL_SEQ_DONE', status)
+
+    SEQ_THREAD = threading.Thread(target=worker, daemon=True)
+    SEQ_THREAD.start()
+
+
+def handle_jog_press(window, servo_num, direction, is_press, values):
+    """Start jog on press and stop on release for Jog CW/CCW buttons."""
     try:
         axis_letter = AXIS_LETTERS[servo_num - 1]
     except Exception:
         print(f'[DEBUG] Invalid servo_num for jog: {servo_num}')
+        return
+    
+    # Get the correct comm object for this axis
+    comm = get_comm_for_axis(axis_letter)
+    if comm is None:
+        print(f'[DEBUG] No comm object for axis {axis_letter}; cannot jog')
         return
 
     speed_str = values.get(f'S{servo_num}_speed', '')
@@ -660,7 +1959,7 @@ def handle_jog_press(window, comm, servo_num, direction, is_press, values):
             return
         if signed_speed < 0 and current_pos <= min_val:
             # Allow slow creep back into range
-            max_speed_limit = NUMERIC_LIMITS.get('speed', (0, 180))[1]
+            max_speed_limit = get_limits(axis_letter, 'speed')[1]
             signed_speed = -min(abs(signed_speed), max_speed_limit * 0.1)
 
     pulses_speed = int(round(signed_speed * scaling * gearbox))
@@ -682,17 +1981,289 @@ def handle_jog_press(window, comm, servo_num, direction, is_press, values):
 
 # Start the background polling thread using ControllerPolling
 # This line starts the background polling thread for the GUI. Specifically:
-# start_polling_thread(window, comm) is a function (imported from ControllerPolling.py) that launches a separate thread.
-# This thread periodically polls the controller (using the comm object) for status updates (like position, torque, enable/disable state) for each servo.
+# start_polling_thread(window, comm, comm_h) is a function (imported from ControllerPolling.py) that launches a separate thread.
+# This thread periodically polls the controller (using the comm object for Galil axes A-G and comm_h for MyActuator axis H) for status updates (like position, torque, enable/disable state) for each servo.
 # It sends these updates back to the GUI window using thread-safe events (such as POSITION_POLL).
 
-polling_thread, polling_stop_event = start_polling_thread(window, comm)
+polling_thread, polling_stop_event = start_polling_thread(window, comm, comm_h)
 
 # Main event loop (no periodic polling here)
 while True:
-    event, values = window.read(timeout=100)
+    try:
+        event, values = window.read(timeout=100)
+    except Exception as loop_error:
+        try:
+            sg.popup_error(f'UI loop error: {loop_error}', keep_on_top=True)
+        except Exception:
+            pass
+        continue
     if event == 'SHOW_POLL_LOGS':
         LOG_POSITION_POLLS = bool(values.get('SHOW_POLL_LOGS', False))
+        continue
+    if event == 'TABGROUP':
+        _refresh_description_colors(window)
+        continue
+    if event == 'ESTOP':
+        # Immediate stop for all axes
+        # Cancel any in-flight DataPipe PR send
+        if hasattr(window, '_dp_pr_stop') and window._dp_pr_stop:
+            try:
+                window._dp_pr_stop.set()
+            except Exception:
+                pass
+        if SEQ_STOP_EVENT is not None:
+            try:
+                SEQ_STOP_EVENT.set()
+            except Exception:
+                pass
+        SEQ_RUNNING = False
+        if 'ALL_RUN_SEQUENCE' in window.AllKeysDict:
+            window['ALL_RUN_SEQUENCE'].update(disabled=False)
+        if 'ALL_STOP_SEQUENCE' in window.AllKeysDict:
+            window['ALL_STOP_SEQUENCE'].update(disabled=True)
+        if comm:
+            try:
+                resp = comm.send_command('ST')
+                LAST_MOTION_COMMAND[:] = [None]*8
+                if not window_closed:
+                    window['DEBUG_LOG'].print(f'[ESTOP] Sent ST to all axes -> {resp}')
+                    for idx in range(1, 9):
+                        window[f'S{idx}_status_light'].update('●', text_color='#FF0000')
+                        window[f'S{idx}_status_text'].update('E-STOP', text_color='#FF0000')
+            except Exception as ex:
+                sg.popup_error(f'E-STOP failed: {ex}', keep_on_top=True)
+        else:
+            sg.popup_error('Controller communications not initialized.', keep_on_top=True)
+        continue
+    if event == 'ALL_SEQ_LOG':
+        msg = values.get(event, '')
+        if not window_closed:
+            window['DEBUG_LOG'].print(msg)
+        continue
+    if event == 'ALL_SEQ_ERROR':
+        err_msg = values.get(event, '')
+        if not window_closed:
+            window['DEBUG_LOG'].print(f'[SEQ ERROR] {err_msg}')
+            sg.popup_error(err_msg, keep_on_top=True)
+        continue
+    if event == 'ALL_STEP_TIME':
+        payload = values.get(event, None)
+        if isinstance(payload, (list, tuple)) and len(payload) >= 2:
+            step_idx, elapsed = payload[0], payload[1]
+            key = f'ALL_STEP{step_idx}_TIME'
+            if key in window.AllKeysDict:
+                try:
+                    window[key].update(f"{float(elapsed):.2f}")
+                except Exception:
+                    window[key].update('—')
+        continue
+    if event == 'ALL_SEQ_DONE':
+        status = values.get(event, '')
+        SEQ_RUNNING = False
+        SEQ_STOP_EVENT = None
+        SEQ_THREAD = None
+        if 'ALL_RUN_SEQUENCE' in window.AllKeysDict:
+            window['ALL_RUN_SEQUENCE'].update(disabled=False)
+        if 'ALL_STOP_SEQUENCE' in window.AllKeysDict:
+            window['ALL_STOP_SEQUENCE'].update(disabled=True)
+        if not window_closed:
+            window['DEBUG_LOG'].print(f'[SEQ] Done: {status}')
+            if isinstance(status, str):
+                if status.startswith('error'):
+                    sg.popup_error(status, keep_on_top=True)
+                elif status == 'completed':
+                    sg.popup_ok('Sequence complete.', keep_on_top=True)
+        continue
+    if event == 'ALL_STOP_SEQUENCE':
+        if SEQ_STOP_EVENT is not None:
+            SEQ_STOP_EVENT.set()
+        continue
+
+    # DataPipe events
+    if event == 'DP_LOAD':
+        file_path = values.get('DP_FILE', '')
+        sheet_name = values.get('DP_SHEET', '') or None
+        try:
+            row_start = int(str(values.get('DP_ROW_START', '2')).strip() or '2')
+            row_end = int(str(values.get('DP_ROW_END', '61')).strip() or '61')
+        except Exception:
+            row_start, row_end = 2, 61
+        try:
+            raw_segments, seconds_guess, missing_axes = load_datapipe_segments(file_path, sheet_name, row_start, row_end)
+            prepared_segments = prepare_datapipe_segments(raw_segments)
+            window._dp_segments = prepared_segments
+            window._dp_time_ms = prepared_segments[0]['time_ms'] if prepared_segments else None
+            render_datapipe_preview(window, prepared_segments)
+            time_note = 'seconds converted to ms' if seconds_guess else 'ms'
+            missing_note = f"; missing headers treated as 0: {', '.join(missing_axes)}" if missing_axes else ''
+            window['DP_STATUS'].update(f"Loaded {len(prepared_segments)} segments ({time_note}{missing_note}).")
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(f"[DP_LOAD] missing axes: {missing_axes}")
+            enable_dp = bool(prepared_segments)
+            window['DP_SEND'].update(disabled=not enable_dp)
+            if 'DP_SEND_PR' in window.AllKeysDict:
+                window['DP_SEND_PR'].update(disabled=not enable_dp)
+            if 'DP_SEND_BATCH_PR' in window.AllKeysDict:
+                window['DP_SEND_BATCH_PR'].update(disabled=not enable_dp)
+        except Exception as e:
+            error_details = f"[DP_LOAD] {e}\n" + traceback.format_exc()
+            window['DP_STATUS'].update(f"Load failed: {e}")
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(error_details)
+
+    if event == 'DP_SEND_BATCH_PR':
+        try:
+            segments = getattr(window, '_dp_segments', None)
+            if not segments:
+                window['DEBUG_LOG'].print('No segments loaded for batch PR.')
+            else:
+                program_str = send_batch_pr_program(comm, segments)
+                window['DEBUG_LOG'].print('Batch PR program sent and executed.')
+        except Exception as e:
+            window['DEBUG_LOG'].print(f'Error: {e}')
+            window['DP_PREVIEW'].update('')
+            window['DP_SEND'].update(disabled=True)
+            if 'DP_SEND_PR' in window.AllKeysDict:
+                window['DP_SEND_PR'].update(disabled=True)
+        continue
+
+    if event == 'DP_SEND':
+        segments = getattr(window, '_dp_segments', None)
+        try:
+            if not segments:
+                raise RuntimeError('No segments loaded. Load first.')
+            send_datapipe_contour(comm, segments, window)
+            window['DP_STATUS'].update('Contour data sent to controller (DT uses first segment).')
+        except Exception as e:
+            window['DP_STATUS'].update(f"Send failed: {e}")
+        continue
+
+    if event == 'DP_SEND_PR':
+        segments = getattr(window, '_dp_segments', None)
+        if not segments:
+            window['DP_STATUS'].update('No segments loaded. Load first.')
+            continue
+        try:
+            line_speed = float(str(values.get('ALL_LINE_SPEED', '1')).strip() or '1')
+        except Exception:
+            line_speed = 1.0
+        if line_speed < 0:
+            line_speed = 0.0
+        max_rows = None
+        try:
+            max_rows_val = str(values.get('DP_RUN_ROWS', '')).strip()
+            if max_rows_val:
+                max_rows = int(float(max_rows_val))
+                if max_rows <= 0:
+                    max_rows = None
+        except Exception:
+            max_rows = None
+        if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+            window['DEBUG_LOG'].print(f"[DP_SEND_PR] rows={len(segments)} max_rows={max_rows} line_speed={line_speed}")
+
+        import threading
+        DP_PR_STOP_EVENT = threading.Event()
+        window._dp_pr_stop = DP_PR_STOP_EVENT
+        window['DP_STATUS'].update('Sending PR sequence...')
+
+        def _run_dp_pr():
+            try:
+                send_datapipe_pr(comm, segments, window, line_speed=line_speed, values=values, max_rows=max_rows, stop_event=DP_PR_STOP_EVENT)
+                ran_rows = max_rows if (max_rows is not None and max_rows > 0) else len(segments)
+                window.write_event_value('DP_PR_DONE', f'PR sequence sent (rows={ran_rows}).')
+            except Exception as e:
+                window.write_event_value('DP_PR_ERROR', f"Send failed: {e}")
+
+        threading.Thread(target=_run_dp_pr, daemon=True).start()
+        continue
+
+    if event == 'DP_PR_PROGRESS':
+        payload = values.get(event, None)
+        if isinstance(payload, (list, tuple)) and len(payload) == 2 and 'DP_STATUS' in window.AllKeysDict:
+            idx, total = payload
+            window['DP_STATUS'].update(f'Sending PR: {idx}/{total}')
+        continue
+
+    if event == 'DP_PR_DONE':
+        msg = values.get(event, '')
+        if 'DP_STATUS' in window.AllKeysDict:
+            window['DP_STATUS'].update(msg)
+        continue
+
+    if event == 'DP_PR_ERROR':
+        msg = values.get(event, '')
+        if 'DP_STATUS' in window.AllKeysDict:
+            window['DP_STATUS'].update(msg)
+        if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+            window['DEBUG_LOG'].print(f"[DP_SEND_PR] error: {msg}")
+        continue
+
+    if event == 'ALL_PVT_SEND':
+        try:
+            sample_ms = float(str(values.get('ALL_PVT_SAMPLE_MS', '50')).strip() or '50')
+            if sample_ms <= 0:
+                raise ValueError('Sample time must be positive.')
+            payload = build_all_pvt_payload(values, window, sample_ms)
+            window._pvt_payload = payload
+            if 'PVT_PREVIEW' in window.AllKeysDict:
+                render_pvt_preview(window, payload)
+            send_pvt_payload(comm, payload, window)
+            status_msg = f"Sent {payload['count']} PVT points from ALL tab @ {sample_ms:.1f} ms."
+            if 'ALL_PVT_STATUS' in window.AllKeysDict:
+                window['ALL_PVT_STATUS'].update(status_msg)
+            if 'PVT_STATUS' in window.AllKeysDict:
+                window['PVT_STATUS'].update(status_msg)
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(f"[ALL_PVT_SEND] points={payload['count']} sample={sample_ms}")
+        except Exception as e:
+            fail_msg = f"Send failed: {e}"
+            if 'ALL_PVT_STATUS' in window.AllKeysDict:
+                window['ALL_PVT_STATUS'].update(fail_msg)
+            if 'PVT_STATUS' in window.AllKeysDict:
+                window['PVT_STATUS'].update(fail_msg)
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(f"[ALL_PVT_SEND] error: {e}\n{traceback.format_exc()}")
+        continue
+
+    if event == 'PVT_LOAD':
+        file_path = str(values.get('PVT_FILE', '') or '').strip()
+        try:
+            sample_ms = float(str(values.get('PVT_SAMPLE_MS', '50')).strip() or '50')
+        except Exception:
+            sample_ms = 50.0
+        try:
+            if not file_path:
+                raise ValueError('Select a PVT file first.')
+            if sample_ms <= 0:
+                raise ValueError('Sample time must be positive.')
+            raw_rows = load_pvt_points(file_path)
+            payload = prepare_pvt_payload(raw_rows, sample_ms)
+            window._pvt_payload = payload
+            render_pvt_preview(window, payload)
+            window['PVT_STATUS'].update(f"Loaded {payload['count']} points @ {sample_ms:.1f} ms.")
+            window['PVT_SEND'].update(disabled=False)
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(f"[PVT_LOAD] points={payload['count']} sample={sample_ms} file={file_path}")
+        except Exception as e:
+            window['PVT_STATUS'].update(f"Load failed: {e}")
+            window['PVT_PREVIEW'].update('')
+            if 'PVT_SEND' in window.AllKeysDict:
+                window['PVT_SEND'].update(disabled=True)
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(f"[PVT_LOAD] error: {e}\n{traceback.format_exc()}")
+        continue
+
+    if event == 'PVT_SEND':
+        payload = getattr(window, '_pvt_payload', None)
+        try:
+            if not payload:
+                raise RuntimeError('Load PVT data first.')
+            send_pvt_payload(comm, payload, window)
+            window['PVT_STATUS'].update('PVT sent to controller (PT/PV/PA, axes A-D).')
+        except Exception as e:
+            window['PVT_STATUS'].update(f"Send failed: {e}")
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print(f"[PVT_SEND] error: {e}\n{traceback.format_exc()}")
         continue
     # Ensure counters are initialized before use
     if not hasattr(window, '_invalid_resp_counters'):
@@ -702,18 +2273,49 @@ while True:
     if not hasattr(window, '_limit_tripped'):
         window._limit_tripped = [False]*8
 
+    # Sync per-servo description input to ALL tab label
+    if isinstance(event, str) and event.startswith('S') and event.endswith('_desc'):
+        try:
+            servo_num = int(event[1:event.index('_')])
+            desc_text = str(values.get(event, '')).strip()
+            display_text = desc_text if desc_text else DEFAULT_SERVO_DESCRIPTIONS.get(servo_num, f'Servo {servo_num}')
+            if f'ALL_S{servo_num}_desc' in window.AllKeysDict:
+                window[f'ALL_S{servo_num}_desc'].update(display_text)
+            axis_letter = AXIS_LETTERS[servo_num - 1]
+            AXIS_UNITS.setdefault(axis_letter, {})['description'] = display_text
+            save_axis_description(axis_letter, display_text)
+        except Exception as desc_err:
+            if not window_closed:
+                window['DEBUG_LOG'].print(f'[ERROR] Descriptor update failed: {desc_err}\n{traceback.format_exc()}')
+        continue
+
+    if handle_all_tab_event(window, event, values):
+        continue
+    if event == 'ALL_RUN_SEQUENCE':
+        handle_all_run_sequence(window, comm, values)
+        continue
+
     if event == 'JOG_PRESS':
         try:
             servo_num, direction, is_press = values.get(event, (None, None, None))
         except Exception:
             servo_num, direction, is_press = None, None, None
         if servo_num is not None and direction is not None and is_press is not None:
-            handle_jog_press(window, comm, int(servo_num), direction, bool(is_press), values)
+            handle_jog_press(window, int(servo_num), direction, bool(is_press), values)
         else:
             print(f'[DEBUG] Invalid JOG_PRESS payload: {values.get(event)}')
         continue
     if event == sg.WIN_CLOSED:
         window_closed = True
+        if SEQ_STOP_EVENT is not None:
+            try:
+                SEQ_STOP_EVENT.set()
+            except Exception:
+                pass
+        try:
+            save_sequence_state_from_values(values)
+        except Exception:
+            pass
         break
 
     if event == 'POSITION_POLL':
@@ -757,24 +2359,36 @@ while True:
                 except Exception:
                     if not window_closed:
                         window[f'S{i}_actual_pos_pulses'].update('N/A')
-            # Stop motion if position exceeds soft limits (safety net for external motion sources)
+            # SAFETY: Stop motion if position exceeds soft limits OR absolute 360-degree rotation limit
             if pos_val_deg is not None:
                 axis_units = AXIS_UNITS[axis_letter]
                 min_val = axis_units['min']
                 max_val = axis_units['max']
-                if (pos_val_deg < min_val or pos_val_deg > max_val) and not window._limit_tripped[i-1]:
+                # Absolute safety: never allow >360 degrees rotation
+                beyond_absolute_limit = abs(pos_val_deg) > ABSOLUTE_SAFETY_LIMIT_DEG
+                beyond_soft_limit = (pos_val_deg < min_val or pos_val_deg > max_val)
+                
+                if (beyond_soft_limit or beyond_absolute_limit) and not window._limit_tripped[i-1]:
                     stop_key = f'S{i}_stop'
                     stop_cmd = COMMAND_MAP.get(stop_key)
                     if stop_cmd and comm:
                         try:
                             stop_cmd_val = stop_cmd if not callable(stop_cmd) else stop_cmd()
                             comm.send_command(stop_cmd_val)
+                            # Clear motion command tracking
+                            LAST_MOTION_COMMAND[i-1] = None
                             if not window_closed:
-                                window['DEBUG_LOG'].print(f'[WARN] Axis {axis_letter} exceeded limits ({min_val},{max_val}); sent stop command: {stop_cmd_val}')
+                                if beyond_absolute_limit:
+                                    limit_msg = f'[SAFETY] Axis {axis_letter} exceeded ABSOLUTE 360° rotation limit at {pos_val_deg:.1f}°; EMERGENCY STOP sent: {stop_cmd_val}'
+                                    popup_msg = f'EMERGENCY STOP!\n\nAxis {axis_letter} exceeded absolute safety limit.\nPosition: {pos_val_deg:.1f}°\n\nServos must NEVER rotate more than 360°.'
+                                else:
+                                    limit_msg = f'[WARN] Axis {axis_letter} exceeded soft limits ({min_val},{max_val}); sent stop command: {stop_cmd_val}'
+                                    popup_msg = f'Axis {axis_letter} exceeded limits ({min_val} to {max_val}). Motion stopped.'
+                                window['DEBUG_LOG'].print(limit_msg)
                                 # Visual + popup notification on first limit trip
                                 window[f'S{i}_status_light'].update('●', text_color='#FF4500')  # Orange-red
                                 window[f'S{i}_status_text'].update('Stopped (limit)', text_color='#FF4500')
-                                sg.popup_ok(f'Axis {axis_letter} exceeded limits ({min_val} to {max_val}). Motion stopped.', keep_on_top=True, title='')
+                                sg.popup_ok(popup_msg, keep_on_top=True, title='Safety Stop' if beyond_absolute_limit else '')
                         except Exception:
                             if not window_closed:
                                 window['DEBUG_LOG'].print(f'[ERROR] Failed to send stop for axis {axis_letter}')
@@ -806,15 +2420,25 @@ while True:
         continue
     # Zero Position button (handle early so it isn't swallowed by generic S*_action logic)
     if isinstance(event, str) and event.endswith('_zero_pos'):
+        import time
+        import traceback
+        print(f'[DEBUG {time.time():.3f}] Zero Pos button clicked, event={event}')
+        print(f'[DEBUG] Call stack:')
+        for line in traceback.format_stack()[:-1]:
+            print(line.strip())
         try:
             servo_num = int(event[1:event.index('_')])
-            dp_args = [','] * 8
-            dp_args[servo_num - 1] = '0'
-            dp_cmd = f"DP {''.join(dp_args)}"
+            print(f'[DEBUG] Parsed servo_num={servo_num}')
+            axis_letter = AXIS_LETTERS[servo_num - 1]
+            print(f'[DEBUG] Axis letter={axis_letter}')
+            
+            # Use axis-specific command instead of multi-axis format
+            dp_cmd = f"DP{axis_letter}=0"
             print(f'[DEBUG] Sending zero position command: {dp_cmd}')
-            if comm:
-                response = comm.send_command(dp_cmd)
-                print(f'[DEBUG] Response: {response}')
+            
+            # Route to correct comm object
+            response = send_axis_command(axis_letter, dp_cmd)
+            print(f'[DEBUG] Response: {response}')
         except Exception as e:
             sg.popup_error(f'Error parsing servo number: {e}', keep_on_top=True)
         continue
@@ -833,14 +2457,12 @@ while True:
         # Convert servo number to axis letter (1->A, 2->B, ...)
         axis_num = int(servo[1:]) if servo.startswith('S') else None
         axis_letter = chr(64 + axis_num) if axis_num and 1 <= axis_num <= 8 else None
-        # For all numeric fields, use AXIS_UNITS min/max for the axis if available
-        if axis_letter and axis_letter in AXIS_UNITS and field in ['abs_pos', 'rel_pos']:
-            min_val = AXIS_UNITS[axis_letter]['min']
-            max_val = AXIS_UNITS[axis_letter]['max']
-            unit_label = 'Deg'
+        # Use axis-specific limits (speed/accel/decel/positions) with defaults
+        if axis_letter:
+            min_val, max_val = get_limits(axis_letter, field)
         else:
             min_val, max_val = NUMERIC_LIMITS.get(field, (0, 54000))
-            unit_label = 'DPS' if field == 'speed' else ('DPS^2' if field in ['accel', 'decel'] else '')
+        unit_label = 'DPS' if field == 'speed' else ('DPS^2' if field in ['accel', 'decel'] else ('Deg' if field in ['abs_pos', 'rel_pos'] else ''))
         # Make popup title more descriptive with setpoint type
         field_titles = {
             'speed': 'Speed',
@@ -874,6 +2496,8 @@ while True:
                         update_setpoint_highlight(window, serv_num)
                     else:
                         set_pending_highlight(window, serv_num, field)
+                    if field in ('speed', 'accel', 'decel'):
+                        update_mid_speed_display(window, serv_num)
                 except Exception:
                     pass
         continue
@@ -905,11 +2529,21 @@ while True:
                 parts = event.split('_', 1)
                 servo_part = parts[0] if len(parts) > 0 else ''
                 field_part = parts[1] if len(parts) > 1 else ''
-                servo_num = int(servo_part[1:]) if servo_part.startswith('S') else None
+                servo_num = None
+                if servo_part.startswith('S'):
+                    servo_num = int(servo_part[1:])
+                elif servo_part == 'ALL' and field_part:
+                    nested = field_part.split('_', 1)
+                    nested_servo = nested[0] if nested else ''
+                    if nested_servo.startswith('S'):
+                        try:
+                            servo_num = int(nested_servo[1:])
+                        except Exception:
+                            servo_num = None
+                    field_part = 'abs_pos'
                 axis_letter = AXIS_LETTERS[servo_num - 1] if servo_num and 1 <= servo_num <= 8 else None
-                if axis_letter and axis_letter in AXIS_UNITS and field_part in ['abs_pos', 'rel_pos']:
-                    min_val = AXIS_UNITS[axis_letter]['min']
-                    max_val = AXIS_UNITS[axis_letter]['max']
+                if axis_letter:
+                    min_val, max_val = get_limits(axis_letter, field_part)
                 else:
                     min_val, max_val = NUMERIC_LIMITS.get(field_part, (0, 54000))
                 clamped = round(max(min_val, min(max_val, numeric_val)), 1)
@@ -920,6 +2554,8 @@ while True:
                         update_setpoint_highlight(window, servo_num)
                     else:
                         set_pending_highlight(window, servo_num, field_part)
+                    if field_part in ('speed', 'accel', 'decel'):
+                        update_mid_speed_display(window, servo_num)
             except Exception:
                 pass
     # Only call handle_servo_event for setpoint OK buttons
@@ -933,6 +2569,8 @@ while True:
         parts = event.split('_')
         if len(parts) == 2:
             servo_num = parts[0][1:]
+            if not str(servo_num).isdigit():
+                continue
             action = parts[1]
             axis_letter = AXIS_LETTERS[int(servo_num)-1]
             prev_log = window['DEBUG_LOG'].get()
@@ -942,109 +2580,3 @@ while True:
             # Reuse the unified handler (handles jog scaling to pulses)
             handle_servo_event(event, values)
         continue
-# -----------------------------
-# Main event loop (now at the very end)
-# -----------------------------
-if __name__ == "__main__":
-    while True:
-        event, values = window.read(timeout=100)
-        # Ensure counters are initialized before use
-        if not hasattr(window, '_invalid_resp_counters'):
-            window._invalid_resp_counters = [0]*8
-        if not hasattr(window, '_last_valid_pos'):
-            window._last_valid_pos = ['']*8
-        if event == sg.WIN_CLOSED:
-            window_closed = True
-            break
-        if event == 'POSITION_POLL':
-            # Handle position update from background thread
-            data = values[event] if event in values else None
-            if data:
-                i = data['servo']
-                axis_letter = data['axis_letter']
-                pos_resp = data.get('pos_resp')
-                raw_resp = data.get('raw_resp')
-                pos_val = None
-                valid = False
-                # Log the raw response for debugging (optional)
-                if not window_closed and LOG_POSITION_POLLS:
-                    window['DEBUG_LOG'].print(f'Axis {axis_letter}: MG _RP{axis_letter} raw response: {raw_resp}')
-                if pos_resp is not None and str(pos_resp).strip() != ':' and str(pos_resp).strip() != '':
-                    try:
-                        pos_val_pulses = float(pos_resp)
-                        axis_units = AXIS_UNITS[axis_letter]
-                        pulses_per_degree = axis_units.get('scaling') or (axis_units.get('pulses', 0) / max(axis_units.get('degrees', 1), 1e-9))
-                        if pulses_per_degree <= 0:
-                            pulses_per_degree = 1
-                        gearbox = axis_units.get('gearbox', 1)
-                        pos_val_deg = pos_val_pulses / (pulses_per_degree * gearbox)
-                        pos_val_disp = 0 if abs(pos_val_deg) < 1e-6 else round(pos_val_deg, 2)
-                        if not window_closed:
-                            window[f'S{i}_actual_pos'].update(str(pos_val_disp))
-                            update_setpoint_highlight(window, i, pos_val_deg)
-                        window._last_valid_pos[i-1] = str(pos_val_disp)
-                        window._invalid_resp_counters[i-1] = 0
-                        valid = True
-                    except Exception:
-                        pass
-                if not valid:
-                    window._invalid_resp_counters[i-1] += 1
-                    if window._invalid_resp_counters[i-1] >= 5:
-                        if not window_closed:
-                            window[f'S{i}_actual_pos'].update('N/A')
-                            window[f'S{i}_actual_pos_pulses'].update('N/A')
-                        log_val = 'N/A'
-                    else:
-                        last_val = window._last_valid_pos[i-1] if window._last_valid_pos[i-1] else ''
-                        if not window_closed:
-                            window[f'S{i}_actual_pos'].update(last_val)
-                            window[f'S{i}_actual_pos_pulses'].update('')
-                        log_val = last_val if last_val else 'N/A'
-                else:
-                    log_val = window._last_valid_pos[i-1]
-                if not window_closed and LOG_POSITION_POLLS:
-                    window['DEBUG_LOG'].print(f'Axis {axis_letter}: MG _RP{axis_letter} -> {log_val}')
-            continue
-        # Motor control logic for servo buttons and OK buttons
-        if isinstance(event, str) and event.startswith('S') and '_' in event:
-            # If this is an OK button for any setpoint, delegate to handle_servo_event (logging is handled after command is sent)
-            if event.endswith('_ok'):
-                handle_servo_event(event, values)
-                continue
-            # Otherwise, handle direct motor control buttons (Enable, Disable, Start, Stop, Jog)
-            parts = event.split('_')
-            if len(parts) == 2:
-                servo_num = parts[0][1:]
-                action = parts[1]
-                axis_letter = AXIS_LETTERS[int(servo_num)-1]
-                prev_log = window['DEBUG_LOG'].get()
-                if not prev_log.endswith('\r\n') and not prev_log.endswith('\n'):
-                    prev_log += '\r\n'
-                window['DEBUG_LOG'].print(f'Button clicked: S{servo_num}_{action} (Axis {axis_letter})')
-                map_key = f'S{servo_num}_{action}'
-                if map_key in COMMAND_MAP:
-                    cmd_func = COMMAND_MAP[map_key]
-                    if action == 'jog':
-                        # Legacy jog button removed; ignore
-                        break
-                    else:
-                        cmd = cmd_func if not callable(cmd_func) else None
-                    print(f'[DEBUG] Sending command: {cmd}')
-                    if comm and cmd:
-                        response = comm.send_command(cmd)
-                        print(f'[DEBUG] Response: {response}')
-                        window['DEBUG_LOG'].print(f'[INFO] Sent {cmd} -> {response}')
-        # Zero Position button
-        if isinstance(event, str) and event.endswith('_zero_pos'):
-            try:
-                servo_num = int(event[1:event.index('_')])
-                dp_args = [','] * 8
-                dp_args[servo_num - 1] = '0'
-                dp_cmd = f"DP {''.join(dp_args)}"
-                print(f'[DEBUG] Sending zero position command: {dp_cmd}')
-                if comm:
-                    response = comm.send_command(dp_cmd)
-                    print(f'[DEBUG] Response: {response}')
-            except Exception as e:
-                sg.popup_error(f'Error parsing servo number: {e}', keep_on_top=True)
-            continue
