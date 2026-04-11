@@ -92,10 +92,19 @@ class RapidCodeAdapter:
             raise ImportError("No module named 'RSI'")
 
         try:
-            # Create motion controller and connect to real hardware
-            self.rmp = motion_controller_cls()
-            self.rmp.Connect()
-            logger.info("RapidCode connected to real hardware")
+            # RSI RapidCode exposes MotionController as an abstract class.
+            # The concrete controller instance is created through the factory.
+            create_from_software = getattr(motion_controller_cls, 'CreateFromSoftware', None)
+            if create_from_software is None:
+                raise RuntimeError('MotionController.CreateFromSoftware not available')
+
+            self.rmp = create_from_software()
+
+            serial_get = getattr(self.rmp, 'SerialNumberGet', None)
+            firmware_get = getattr(self.rmp, 'FirmwareVersionGet', None)
+            serial = serial_get() if callable(serial_get) else 'unknown'
+            firmware = firmware_get() if callable(firmware_get) else 'unknown'
+            logger.info("RapidCode connected to real hardware (serial=%s, firmware=%s)", serial, firmware)
 
             # Discover and enable EtherCAT slaves
             # TODO: Implement EtherCAT slave discovery
