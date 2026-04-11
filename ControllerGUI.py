@@ -192,13 +192,25 @@ SEQ_THREAD = None
 SEQ_STOP_EVENT = None
 SEQ_RUNNING = False
 SEQUENCE_STATE_FILE = os.path.join(os.path.dirname(__file__), 'sequence_state.json')
+MOTION_DEFAULTS_FILE = os.path.join(os.path.dirname(__file__), 'motion_defaults.json')
+STARTUP_ACCEL_DECEL_DEFAULT = 10.0
 
 # Safety: Track last command type per servo to prevent unsafe Start Motion
 # Values: 'abs', 'rel', 'jog', or None
 LAST_MOTION_COMMAND = [None] * 8
+JOG_THREADS = [None] * 8
+JOG_STOP_EVENTS = [None] * 8
 
 # Absolute safety limit: never allow more than 360 degrees rotation from zero
 ABSOLUTE_SAFETY_LIMIT_DEG = 360.0
+# [CHANGE 2026-03-24 12:42:00 -04:00] Axis E conservative relative-step safety cap.
+AXIS_E_MAX_RELATIVE_STEP_DEG = 15.0
+# [CHANGE 2026-03-24 13:24:00 -04:00] Axis E jog safety: one-shot jog step cap per click.
+AXIS_E_JOG_STEP_DEG = 1.0
+# [CHANGE 2026-03-27 10:15:00 -04:00] Per-servo jog amount input range (degrees).
+JOG_STEP_MIN_DEG = 0.0
+JOG_STEP_MAX_DEG = 5.0
+JOG_STEP_DEFAULT_DEG = 1.0
 
 # ============================================================================
 # Constants and Global Variables
@@ -288,16 +300,8 @@ def pulses_to_degrees(raw_val, axis_letter):
 
 def bind_jog_press_release(window):
     """Bind mouse press/release for jog CW/CCW buttons to synthesize events."""
-    for i in range(1, 9):
-        for direction in ['cw', 'ccw']:
-            key = f'S{i}_jog_{direction}'
-            if key in window.AllKeysDict:
-                btn = window[key]
-                try:
-                    btn.Widget.bind('<ButtonPress-1>', lambda e, s=i, d=direction: window.write_event_value('JOG_PRESS', (s, d, True)))
-                    btn.Widget.bind('<ButtonRelease-1>', lambda e, s=i, d=direction: window.write_event_value('JOG_PRESS', (s, d, False)))
-                except Exception:
-                    pass
+    # [CHANGE 2026-03-24 13:36:00 -04:00] Safety: disable press/release jog bindings to avoid hold-runaway behavior.
+    return
 
 
 def set_pending_highlight(window, servo_num, field):
@@ -767,6 +771,90 @@ def restore_sequence_state(window, state):
                     window[key].update(str(val))
     except Exception:
         pass
+
+
+def load_motion_defaults():
+    """Load persisted startup defaults for servo motion fields."""
+    try:
+        if os.path.exists(MOTION_DEFAULTS_FILE):
+            with open(MOTION_DEFAULTS_FILE, 'r') as fh:
+                data = json.load(fh)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def save_motion_defaults_from_values(values):
+    """Persist accel/decel values so they can be restored on next startup."""
+    state = {'servos': {}}
+    for i in range(1, 9):
+        accel_raw = str(values.get(f'S{i}_accel', '')).strip()
+        decel_raw = str(values.get(f'S{i}_decel', '')).strip()
+        entry = {}
+        try:
+            if accel_raw not in ('', '-', '.', '-.'):
+                entry['accel'] = float(accel_raw)
+        except Exception:
+            pass
+        try:
+            if decel_raw not in ('', '-', '.', '-.'):
+                entry['decel'] = float(decel_raw)
+        except Exception:
+            pass
+        if entry:
+            state['servos'][str(i)] = entry
+    try:
+        with open(MOTION_DEFAULTS_FILE, 'w') as fh:
+            json.dump(state, fh)
+    except Exception:
+        pass
+
+
+# [CHANGE 2026-03-24 11:29:00 -04:00] Rename startup defaults helper to reflect speed/accel/decel scope.
+def apply_startup_motion_defaults(window):
+    """Apply remembered accel/decel or fallback defaults at program startup."""
+    remembered = load_motion_defaults().get('servos', {})
+    if not hasattr(window, '_last_setpoints') or not window._last_setpoints or len(window._last_setpoints) != 8:
+        window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos', 'jog_amount']} for _ in range(8)]
+
+    for i in range(1, 9):
+        rem = remembered.get(str(i), {}) if isinstance(remembered, dict) else {}
+        accel_val = rem.get('accel', STARTUP_ACCEL_DECEL_DEFAULT)
+        decel_val = rem.get('decel', STARTUP_ACCEL_DECEL_DEFAULT)
+
+        try:
+            accel_fmt = format_display_value(float(accel_val))
+        except Exception:
+            accel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
+        try:
+            decel_fmt = format_display_value(float(decel_val))
+        except Exception:
+            decel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
+
+        accel_key = f'S{i}_accel'
+        decel_key = f'S{i}_decel'
+        if accel_key in window.AllKeysDict:
+            current_accel = str(window[accel_key].get()).strip()
+            if current_accel in ('', '-', '.', '-.'):
+                window[accel_key].update(accel_fmt)
+        if decel_key in window.AllKeysDict:
+            current_decel = str(window[decel_key].get()).strip()
+            if current_decel in ('', '-', '.', '-.'):
+                window[decel_key].update(decel_fmt)
+
+        try:
+            window._last_setpoints[i - 1]['accel'] = float(accel_fmt)
+        except Exception:
+            window._last_setpoints[i - 1]['accel'] = STARTUP_ACCEL_DECEL_DEFAULT
+        try:
+            window._last_setpoints[i - 1]['decel'] = float(decel_fmt)
+        except Exception:
+            window._last_setpoints[i - 1]['decel'] = STARTUP_ACCEL_DECEL_DEFAULT
+
+    # [CHANGE 2026-03-24 11:19:00 -04:00] Recompute midpoint speed labels after startup defaults are applied.
+    for i in range(1, 9):
+        update_mid_speed_display(window, i)
 # -----------------------------
 # Servo setup:Dictionary mapping each field to its min and max values (same for all servos)
 # Automatically generate command mappings for all 8 servos
@@ -793,34 +881,59 @@ for i in range(1, 9):
 # Galil only
 COMMAND_MAP = GALIL_COMMAND_MAP
 
-# Initialize ControllerComm with Galil config from INI file
+# Initialize ControllerComm with RSI and ClearCore from INI file
+# Initialize ControllerComm with RSI and ClearCore from INI file
 import os
-comm = None
-comm_h = None  # Separate comm for MyActuator axis H
+comm = None       # RSI Software (axes A-D) - Servos 1-4
+comm_e = None     # ClearCore (axis E) - Servo 5
+comm_h = None     # MyActuator (axis H) - Servo 8
+
 try:
     config = configparser.ConfigParser()
     ini_path = os.path.join(os.path.dirname(__file__), 'controller_config.ini')
     print(f'[DEBUG] Reading INI file from: {ini_path}')
     config.read(ini_path)
     print(f'[DEBUG] Sections found: {config.sections()}')
-    galil_config = dict(config.items('CommMode1')) if config.has_section('CommMode1') else {}
-    print(f'[DEBUG] galil_config: {galil_config}')
-    comm = ControllerComm(mode='CommMode1', galil_config=galil_config)
-    print(f'[DEBUG] ControllerComm initialized: comm={comm}, mode={getattr(comm, "mode", None)}')
     
-    # Initialize MyActuator for Servo H if configured
+    # Initialize RSI for axes A-D (Servos 1-4) - OPTIONAL if not running yet
+    if config.has_section('CommMode1'):
+        rsi_config = dict(config.items('CommMode1'))
+        print(f'[DEBUG] rsi_config: {rsi_config}')
+        try:
+            comm = ControllerComm(mode='CommMode1', rsi_config=rsi_config)
+            print('[DEBUG] RSI Software initialized for Axes A-D (Servos 1-4)')
+        except Exception as rsi_error:
+            print(f'[WARNING] RSI not available: {rsi_error}')
+            print('[INFO] Continuing without RSI - only Axis E (ClearCore) will be available')
+            comm = None
+    
+    # Initialize ClearCore for axis E (Servo 5) - THIS WILL WORK INDEPENDENTLY
+    if config.has_section('CommMode6'):
+        clearcore_config = dict(config.items('CommMode6'))
+        print(f'[DEBUG] clearcore_config: {clearcore_config}')
+        comm_e = ControllerComm(mode='CommMode6', clearcore_config=clearcore_config)
+        print('[DEBUG] ClearCore Board 1 initialized for Axis E (Servo 5)')
+    
+    # Initialize MyActuator for axis H (Servo 8) - OPTIONAL if not connected
     if config.has_section('CommMode5'):
         myactuator_config = dict(config.items('CommMode5'))
         print(f'[DEBUG] myactuator_config: {myactuator_config}')
-        comm_h = ControllerComm(mode='CommMode5', myactuator_config=myactuator_config)
-        print(f'[DEBUG] MyActuator ControllerComm initialized for Servo H')
+        try:
+            comm_h = ControllerComm(mode='CommMode5', myactuator_config=myactuator_config)
+            print('[DEBUG] MyActuator initialized for Axis H (Servo 8)')
+        except Exception as myact_error:
+            print(f'[WARNING] MyActuator not available: {myact_error}')
+            comm_h = None
+
 except Exception as comm_error:
     comm = None
+    comm_e = None
     comm_h = None
     import traceback
     error_details = f'{comm_error}\n' + traceback.format_exc()
     sg.popup_error(f'Failed to initialize controller communications:\n{comm_error}', keep_on_top=True)
     print(f'[ERROR] Failed to initialize controller communications: {error_details}')
+
 
 def build_servo_tab(servo_num):
 ###############################################################################
@@ -897,7 +1010,17 @@ def build_servo_tab(servo_num):
             sg.Button('Start Motion', key=f'S{servo_num}_start', size=(12,2), font=GLOBAL_FONT),
             sg.Button('Stop Motion', key=f'S{servo_num}_stop', size=(12,2), font=GLOBAL_FONT),
             sg.Button('Jog CW', key=f'S{servo_num}_jog_cw', size=(8,2), font=GLOBAL_FONT),
-            sg.Button('Jog CCW', key=f'S{servo_num}_jog_ccw', size=(8,2), font=GLOBAL_FONT)
+            sg.Button('Jog CCW', key=f'S{servo_num}_jog_ccw', size=(8,2), font=GLOBAL_FONT),
+            sg.Text('Jog Amt (deg):', font=GLOBAL_FONT),
+            sg.Input(
+                default_text=format_display_value(JOG_STEP_DEFAULT_DEG),
+                key=f'S{servo_num}_jog_amount',
+                size=(5,1),
+                font=GLOBAL_FONT,
+                enable_events=True,
+                justification='center'
+            ),
+            sg.Button('⌨', key=f'S{servo_num}_jog_amount_keypad', size=(2,1), font=GLOBAL_FONT)
         ]
     ]
     return layout
@@ -983,6 +1106,7 @@ NUMERIC_LIMITS = {
     'decel': (0, 180),
     'abs_pos': (0, 180),
     'rel_pos': (-90, 90),
+    'jog_amount': (JOG_STEP_MIN_DEG, JOG_STEP_MAX_DEG),
 }
 
 
@@ -990,7 +1114,15 @@ def get_limits(axis_letter: str, field: str):
     """Return (min, max) for a field, preferring axis-specific overrides."""
     axis_cfg = AXIS_UNITS.get(axis_letter, {})
     default_min, default_max = NUMERIC_LIMITS.get(field, (None, None))
-    if field in ('abs_pos', 'rel_pos'):
+    if field == 'rel_pos':
+        custom_abs_min = axis_cfg.get('min')
+        custom_abs_max = axis_cfg.get('max')
+        if custom_abs_min is not None and custom_abs_max is not None:
+            rel_span = abs(float(custom_abs_max) - float(custom_abs_min))
+            if rel_span > 0:
+                return -rel_span, rel_span
+        return default_min, default_max
+    if field == 'abs_pos':
         custom_min = axis_cfg.get('min')
         custom_max = axis_cfg.get('max')
     else:
@@ -1059,7 +1191,7 @@ def update_mid_speed_display(window, servo_num: int):
 NUMERIC_INPUT_KEYS = []
 NUMERIC_KEYPAD_BUTTONS = []
 for i in range(1, 9):
-    for field in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']:
+    for field in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos', 'jog_amount']:
         NUMERIC_INPUT_KEYS.append(f'S{i}_{field}')
         NUMERIC_KEYPAD_BUTTONS.append(f'S{i}_{field}_keypad')
     for pos_field in ['pos1', 'pos2', 'pos3', 'pos4', 'pos5']:
@@ -1106,6 +1238,9 @@ _refresh_description_colors(window)
 # Restore saved ALL tab sequence state (repeat flag, enable flags, setpoints)
 restore_sequence_state(window, load_sequence_state())
 
+# [CHANGE 2026-03-24 11:19:00 -04:00] Apply remembered accel/decel startup defaults (fallback=10).
+apply_startup_motion_defaults(window)
+
 ###############################################################################
 # Show popup if communications not initialized
 ###############################################################################
@@ -1115,8 +1250,12 @@ if comm is None:
 def get_comm_for_axis(axis_letter):
     """Return the appropriate comm object for the given axis."""
     if axis_letter == 'H' and comm_h is not None:
-        return comm_h
-    return comm
+        return comm_h  # MyActuator (Servo 8)
+    elif axis_letter == 'E' and comm_e is not None:
+        return comm_e  # ClearCore (Servo 5)
+    elif axis_letter in ['A', 'B', 'C', 'D'] and comm is not None:
+        return comm  # RSI Software (Servos 1-4)
+    return comm  # Fallback
 
 def send_axis_command(axis_letter, cmd):
     """Send command to the appropriate controller based on axis."""
@@ -1124,6 +1263,106 @@ def send_axis_command(axis_letter, cmd):
     if controller is None:
         return False
     return controller.send_command(cmd)
+
+
+def sync_axis_e_actual_from_commanded(window, servo_num=5):
+    """Servo E has no encoder feedback; mirror the commanded endpoint into Actual Position fields."""
+    try:
+        if comm_e is None:
+            return
+        axis_letter = AXIS_LETTERS[servo_num - 1]
+        if axis_letter != 'E':
+            return
+
+        commanded_pulses = getattr(comm_e, 'clearcore_commanded_position', None)
+        if commanded_pulses is None:
+            commanded_pulses = getattr(comm_e, 'clearcore_last_position', None)
+        if commanded_pulses is None:
+            return
+
+        axis_units = AXIS_UNITS.get('E', {})
+        scaling = axis_units.get('scaling', 1) or 1
+        gearbox = axis_units.get('gearbox', 1) or 1
+        commanded_deg = float(commanded_pulses) / (scaling * gearbox)
+        commanded_disp = 0 if abs(commanded_deg) < 1e-6 else round(commanded_deg, 2)
+
+        if not hasattr(window, '_last_valid_pos'):
+            window._last_valid_pos = [''] * 8
+        if not hasattr(window, '_last_pos_update_ts'):
+            window._last_pos_update_ts = [None] * 8
+
+        if f'S{servo_num}_actual_pos' in window.AllKeysDict:
+            window[f'S{servo_num}_actual_pos'].update(str(commanded_disp))
+        if f'S{servo_num}_actual_pos_pulses' in window.AllKeysDict:
+            window[f'S{servo_num}_actual_pos_pulses'].update(str(int(round(float(commanded_pulses)))))
+
+        window._last_valid_pos[servo_num - 1] = str(commanded_disp)
+        window._last_pos_update_ts[servo_num - 1] = time.time()
+        update_setpoint_highlight(window, servo_num, commanded_deg)
+    except Exception:
+        pass
+
+
+def adjust_axis_e_actual_by_delta(window, servo_num, delta_deg):
+    """Servo E helper: adjust displayed Actual Position by a known commanded delta (deg)."""
+    try:
+        axis_letter = AXIS_LETTERS[servo_num - 1]
+        if axis_letter != 'E':
+            return
+
+        # [CHANGE 2026-03-27 11:35:00 -04:00] Use ClearCore commanded cache as baseline to avoid UI/poll jitter.
+        base_deg = None
+        try:
+            if comm_e is not None:
+                commanded_pulses = getattr(comm_e, 'clearcore_commanded_position', None)
+                if commanded_pulses is None:
+                    commanded_pulses = getattr(comm_e, 'clearcore_last_position', None)
+                if commanded_pulses is not None:
+                    axis_units = AXIS_UNITS.get('E', {})
+                    scaling = axis_units.get('scaling', 1) or 1
+                    gearbox = axis_units.get('gearbox', 1) or 1
+                    base_deg = float(commanded_pulses) / (scaling * gearbox)
+        except Exception:
+            base_deg = None
+
+        if base_deg is None:
+            try:
+                base_deg = float(window._last_valid_pos[servo_num - 1]) if window._last_valid_pos[servo_num - 1] not in ('', None) else None
+            except Exception:
+                base_deg = None
+        if base_deg is None:
+            # Fall back to current commanded cache if UI baseline is unavailable.
+            sync_axis_e_actual_from_commanded(window, servo_num)
+            try:
+                base_deg = float(window._last_valid_pos[servo_num - 1]) if window._last_valid_pos[servo_num - 1] not in ('', None) else 0.0
+            except Exception:
+                base_deg = 0.0
+
+        new_deg = base_deg + float(delta_deg)
+        axis_units = AXIS_UNITS.get('E', {})
+        scaling = axis_units.get('scaling', 1) or 1
+        gearbox = axis_units.get('gearbox', 1) or 1
+        new_pulses = int(round(new_deg * scaling * gearbox))
+
+        if comm_e is not None:
+            setattr(comm_e, 'clearcore_last_position', new_pulses)
+            setattr(comm_e, 'clearcore_commanded_position', new_pulses)
+
+        new_disp = 0 if abs(new_deg) < 1e-6 else round(new_deg, 2)
+        if f'S{servo_num}_actual_pos' in window.AllKeysDict:
+            window[f'S{servo_num}_actual_pos'].update(str(new_disp))
+        if f'S{servo_num}_actual_pos_pulses' in window.AllKeysDict:
+            window[f'S{servo_num}_actual_pos_pulses'].update(str(new_pulses))
+
+        if not hasattr(window, '_last_valid_pos'):
+            window._last_valid_pos = [''] * 8
+        if not hasattr(window, '_last_pos_update_ts'):
+            window._last_pos_update_ts = [None] * 8
+        window._last_valid_pos[servo_num - 1] = str(new_disp)
+        window._last_pos_update_ts[servo_num - 1] = time.time()
+        update_setpoint_highlight(window, servo_num, new_deg)
+    except Exception:
+        pass
 
 window_closed = False
 import time
@@ -1136,7 +1375,7 @@ def initialize_setpoints_from_controller(window, comm):
         return
     # Ensure tracking structure exists even if controller queries fail
     if not hasattr(window, '_last_setpoints') or not window._last_setpoints or len(window._last_setpoints) != 8:
-        window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos']} for _ in range(8)]
+        window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos', 'jog_amount']} for _ in range(8)]
     try:
         mode = getattr(comm, 'mode', None)
     except Exception:
@@ -1235,11 +1474,14 @@ def update_setpoint_highlight(window, servo_num, actual_deg=None, tolerance=0.1)
         window[key].update(background_color=DEFAULT_INPUT_BG)
 
 
-# Bind jog press/release after window creation
+# [CHANGE 2026-03-24 13:36:00 -04:00] Press/release jog binding intentionally disabled for safety.
 bind_jog_press_release(window)
 
 # Seed GUI setpoints/status from controller before starting polling
 initialize_setpoints_from_controller(window, comm)
+
+# [CHANGE 2026-03-24 11:19:00 -04:00] Re-apply startup accel/decel defaults for any unseeded fields.
+apply_startup_motion_defaults(window)
 
 
 def render_datapipe_preview(window, segments):
@@ -1511,6 +1753,17 @@ def handle_servo_event(event, values):
                         current_pos = float(window._last_valid_pos[servo_num - 1]) if window._last_valid_pos[servo_num - 1] else 0.0
                     except Exception:
                         current_pos = 0.0
+                    # [CHANGE 2026-03-24 12:42:00 -04:00] Axis E safety: enforce conservative step cap without hard-blocking transient unknown live position.
+                    if axis_letter == 'E':
+                        if abs(value) > AXIS_E_MAX_RELATIVE_STEP_DEG:
+                            sg.popup_error(
+                                f'Axis E relative move blocked for safety.\n\n'
+                                f'Max single relative step is ±{AXIS_E_MAX_RELATIVE_STEP_DEG} deg.\n'
+                                f'Entered: {value} deg',
+                                keep_on_top=True,
+                                title='Safety Block'
+                            )
+                            return
                     target_pos = current_pos + value
                     if target_pos < min_val or target_pos > max_val:
                         print(f'[DEBUG] Relative move would exceed limits: current={current_pos}, delta={value}, target={target_pos}, limits=({min_val},{max_val})')
@@ -1543,7 +1796,7 @@ def handle_servo_event(event, values):
                             set_pending_highlight(window, servo_num, field)
                     print('[DEBUG] User canceled setpoint send')
                     return
-                # Convert degrees to pulses using scaling and gearbox
+                # Convert engineering units to pulses using axis scaling and gearbox.
                 scaling = AXIS_UNITS[axis_letter].get('scaling', 1)
                 gearbox = AXIS_UNITS[axis_letter].get('gearbox', 1)
                 pulses_value = int(round(value * scaling * gearbox))
@@ -1553,6 +1806,14 @@ def handle_servo_event(event, values):
                     cmd = cmd_func(pulses_value)
                 else:
                     cmd = cmd_func
+
+                # ClearCore Axis E: stage move on OK, execute on Start Motion
+                if axis_letter == 'E' and field in ('abs_pos', 'rel_pos') and isinstance(cmd, str):
+                    if cmd.startswith('PAE='):
+                        cmd = 'QPAE=' + cmd.split('=', 1)[1]
+                    elif cmd.startswith('PRE='):
+                        cmd = 'QPRE=' + cmd.split('=', 1)[1]
+
                 print(f'[DEBUG] About to send setpoint command: {cmd}')
                 if not cmd:
                     print('[DEBUG] RETURN: cmd is None')
@@ -1566,7 +1827,13 @@ def handle_servo_event(event, values):
                     response = send_axis_command(axis_letter, cmd)
                     print(f'[DEBUG] Setpoint command sent, response: {response}')
                     if not window_closed:
-                        log_line = f"[TEST LOG] {field.capitalize()} OK for S{servo_num}: Sent {cmd}\nReply: {response}\n"
+                        if axis_letter == 'E' and field in ('abs_pos', 'rel_pos') and isinstance(cmd, str) and cmd.startswith('QP'):
+                            log_line = (
+                                f"[TEST LOG] {field.capitalize()} OK for S{servo_num}: Staged {cmd} "
+                                f"(waiting for Start Motion)\nReply: {response}\n"
+                            )
+                        else:
+                            log_line = f"[TEST LOG] {field.capitalize()} OK for S{servo_num}: Sent {cmd}\nReply: {response}\n"
                         print(f'[DEBUG] Logging setpoint to DEBUG_LOG: {log_line.strip()}')
                         window['DEBUG_LOG'].print(log_line, end='')
                         window['DEBUG_LOG'].Widget.see('end')
@@ -1616,14 +1883,20 @@ def handle_servo_event(event, values):
                     min_val, max_val = AXIS_UNITS[axis_letter]['min'], AXIS_UNITS[axis_letter]['max']
                     if current_pos is not None:
                         if speed_val > 0 and current_pos >= max_val:
+                            if hasattr(window, '_jog_limit_hit'):
+                                window._jog_limit_hit[servo_num - 1] = True
+                            window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+                            window[f'S{servo_num}_status_text'].update('At Max Limit', text_color='#FFA500')
                             sg.popup_error(f'Jog blocked: at limit {max_val} deg', keep_on_top=True)
                             return
-                        # Allow jogging below min but cap speed to 20% of max speed
                         if speed_val < 0 and current_pos <= min_val:
-                            max_speed_limit = get_limits(axis_letter, 'speed')[1]
-                            capped = -min(abs(speed_val), max_speed_limit * 0.1)
-                            speed_val = capped
-                    # Convert degrees/sec to pulses/sec using scaling and gearbox
+                            if hasattr(window, '_jog_limit_hit'):
+                                window._jog_limit_hit[servo_num - 1] = True
+                            window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+                            window[f'S{servo_num}_status_text'].update('At Min Limit', text_color='#FFA500')
+                            sg.popup_error(f'Jog blocked: at limit {min_val} deg', keep_on_top=True)
+                            return
+                    # Convert degrees/sec to pulses/sec using scaling and gearbox.
                     axis_letter = AXIS_LETTERS[servo_num - 1]
                     scaling = AXIS_UNITS[axis_letter].get('scaling', 1)
                     gearbox = AXIS_UNITS[axis_letter].get('gearbox', 1)
@@ -1647,12 +1920,67 @@ def handle_servo_event(event, values):
                             title='Safety Block'
                         )
                         return
+                    if axis_letter == 'E':
+                        try:
+                            axis_units = AXIS_UNITS[axis_letter]
+                            scaling = axis_units.get('scaling', 1) or 1
+                            gearbox = axis_units.get('gearbox', 1) or 1
+
+                            # [CHANGE 2026-03-24 11:06:00 -04:00] Deterministically stage Axis E target on Start.
+                            # This prevents BGE from running without a pending target when operator hasn't pressed setpoint OK recently.
+                            if last_cmd == 'abs':
+                                abs_raw = values.get(f'S{servo_num}_abs_pos', '')
+                                if abs_raw not in ('', None, '-', '.'):
+                                    abs_deg = float(abs_raw)
+                                    abs_min, abs_max = get_limits(axis_letter, 'abs_pos')
+                                    abs_deg = max(abs_min, min(abs_max, abs_deg))
+                                    abs_pulses = int(round(abs_deg * scaling * gearbox))
+                                    send_axis_command(axis_letter, f'QPAE={abs_pulses}')
+                                    if comm_e is not None:
+                                        setattr(comm_e, 'clearcore_commanded_position', abs_pulses)
+                            elif last_cmd == 'rel':
+                                rel_raw = values.get(f'S{servo_num}_rel_pos', '')
+                                if rel_raw not in ('', None, '-', '.'):
+                                    rel_deg = float(rel_raw)
+                                    rel_pulses = int(round(rel_deg * scaling * gearbox))
+                                    send_axis_command(axis_letter, f'QPRE={rel_pulses}')
+                                    if comm_e is not None:
+                                        base = getattr(comm_e, 'clearcore_commanded_position', None)
+                                        if base is None:
+                                            base = getattr(comm_e, 'clearcore_last_position', 0)
+                                        setattr(comm_e, 'clearcore_commanded_position', int(base) + rel_pulses)
+
+                            speed_raw = values.get(f'S{servo_num}_speed', '')
+                            accel_raw = values.get(f'S{servo_num}_accel', '')
+
+                            if speed_raw not in ('', None, '-', '.'):
+                                speed_val = float(speed_raw)
+                                speed_pulses = int(round(speed_val * scaling * gearbox))
+                                send_axis_command(axis_letter, f'SP{axis_letter}={speed_pulses}')
+
+                            if accel_raw not in ('', None, '-', '.'):
+                                accel_val = float(accel_raw)
+                                accel_pulses = int(round(accel_val * scaling * gearbox))
+                                send_axis_command(axis_letter, f'AC{axis_letter}={accel_pulses}')
+                        except Exception as start_param_err:
+                            if not window_closed:
+                                window['DEBUG_LOG'].print(f'[WARN] Axis E start pre-load skipped: {start_param_err}')
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
                 case 'enable' | 'disable' | 'stop':
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
                     if action == 'stop':
                         # Clear motion command tracking on stop
                         LAST_MOTION_COMMAND[servo_num - 1] = None
+                        # [CHANGE 2026-03-24 10:58:00 -04:00] Force-cancel any active press-and-hold jog worker before issuing stop.
+                        idx = servo_num - 1
+                        if 0 <= idx < len(JOG_STOP_EVENTS):
+                            try:
+                                stop_evt = JOG_STOP_EVENTS[idx]
+                                if stop_evt is not None:
+                                    stop_evt.set()
+                            except Exception:
+                                pass
+                            JOG_STOP_EVENTS[idx] = None
                 case _:
                     # For any other actions, fallback to original logic if needed
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
@@ -1664,7 +1992,7 @@ def handle_servo_event(event, values):
                         if action == 'disable':
                             stop_key = f'S{servo_num}_stop'
                             stop_cmd = COMMAND_MAP.get(stop_key)
-                            if stop_cmd:
+                            if stop_cmd and axis_letter != 'E':
                                 stop_cmd_val = stop_cmd if not callable(stop_cmd) else stop_cmd()
                                 send_axis_command(axis_letter, stop_cmd_val)
                         response = send_axis_command(axis_letter, cmd)
@@ -1673,14 +2001,28 @@ def handle_servo_event(event, values):
                             prev_log = window['DEBUG_LOG'].get()
                             new_log = f"[TEST LOG] {action.capitalize()} button clicked for S{servo_num}: Sent {cmd}\nReply: {response}\n"
                             window['DEBUG_LOG'].update(prev_log + new_log)
-                        # Immediately update indicator color (bright green for enable, bright yellow for disable)
-                        match action:
-                            case 'enable':
-                                window[f'S{servo_num}_status_light'].update('●', text_color='#00FF00')  # Bright green
-                                window[f'S{servo_num}_status_text'].update('Enabled', text_color='#00FF00')
-                            case 'disable':
-                                window[f'S{servo_num}_status_light'].update('●', text_color='#FFFF00')  # Bright yellow
-                                window[f'S{servo_num}_status_text'].update('Disabled', text_color='#FFFF00')
+                        action_succeeded = not (
+                            response is False or
+                            (isinstance(response, str) and str(response).strip().upper().startswith('UNSUPPORTED'))
+                        )
+                        if action_succeeded:
+                            # Immediately update indicator color (bright green for enable, bright yellow for disable)
+                            match action:
+                                case 'enable':
+                                    window[f'S{servo_num}_status_light'].update('●', text_color='#00FF00')  # Bright green
+                                    window[f'S{servo_num}_status_text'].update('Enabled', text_color='#00FF00')
+                                case 'disable':
+                                    window[f'S{servo_num}_status_light'].update('●', text_color='#FFFF00')  # Bright yellow
+                                    window[f'S{servo_num}_status_text'].update('Disabled', text_color='#FFFF00')
+                            if axis_letter == 'E' and action == 'start':
+                                # [CHANGE 2026-03-27 11:05:00 -04:00] Servo E has no feedback; mirror accepted start target.
+                                sync_axis_e_actual_from_commanded(window, servo_num)
+                        elif action in ('disable', 'stop') and axis_letter == 'E':
+                            # [CHANGE 2026-03-23 16:32:24 -04:00] Non-blocking unsupported indicator for Axis E disable/stop.
+                            if not window_closed:
+                                window['DEBUG_LOG'].print(f"[WARN] Axis E {action} is not supported by current ClearCore firmware command set.")
+                            window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+                            window[f'S{servo_num}_status_text'].update(f'{action.capitalize()} unsupported', text_color='#FFA500')
                     except Exception as e:
                         import traceback
                         error_details = f'{e}\n' + traceback.format_exc()
@@ -1939,6 +2281,30 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
         print(f'[DEBUG] Invalid speed value for Jog: {speed_str}')
         return
 
+    jog_amount_str = str(values.get(f'S{servo_num}_jog_amount', JOG_STEP_DEFAULT_DEG)).strip()
+    if jog_amount_str in ('', '-', '.', '-.'):
+        jog_amount_deg = JOG_STEP_DEFAULT_DEG
+    else:
+        try:
+            jog_amount_deg = float(jog_amount_str)
+        except ValueError:
+            sg.popup_error(
+                f'Jog amount must be numeric ({JOG_STEP_MIN_DEG} to {JOG_STEP_MAX_DEG} deg).',
+                keep_on_top=True
+            )
+            return
+
+    if jog_amount_deg < JOG_STEP_MIN_DEG or jog_amount_deg > JOG_STEP_MAX_DEG:
+        sg.popup_error(
+            f'Jog amount must be between {JOG_STEP_MIN_DEG} and {JOG_STEP_MAX_DEG} deg.',
+            keep_on_top=True
+        )
+        try:
+            window[f'S{servo_num}_jog_amount'].update(format_display_value(JOG_STEP_DEFAULT_DEG))
+        except Exception:
+            pass
+        return
+
     sign = 1 if str(direction).lower() == 'cw' else -1
     signed_speed = speed_val * sign
 
@@ -1953,24 +2319,57 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
     except Exception:
         current_pos = None
 
-    if current_pos is not None:
+    pos_is_fresh = True
+    try:
+        import time as _time
+        if hasattr(window, '_last_pos_update_ts') and len(window._last_pos_update_ts) >= servo_num:
+            ts = window._last_pos_update_ts[servo_num - 1]
+            pos_is_fresh = (ts is not None) and ((_time.time() - float(ts)) <= 1.5)
+    except Exception:
+        pos_is_fresh = True
+
+    # [CHANGE 2026-03-24 16:30:00 -04:00] Disable Axis E pre-jog limit gate due to false stale-position min-limit trips.
+    # Axis E still has runtime safety stop enforcement in POSITION_POLL limit checks.
+    enforce_limit = current_pos is not None and axis_letter != 'E'
+
+    if enforce_limit:
         if signed_speed > 0 and current_pos >= max_val:
+            if hasattr(window, '_jog_limit_hit'):
+                window._jog_limit_hit[servo_num - 1] = True
+            window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+            window[f'S{servo_num}_status_text'].update('At Max Limit', text_color='#FFA500')
             sg.popup_error(f'Jog blocked: at upper limit {max_val} deg', keep_on_top=True)
             return
         if signed_speed < 0 and current_pos <= min_val:
-            # Allow slow creep back into range
-            max_speed_limit = get_limits(axis_letter, 'speed')[1]
-            signed_speed = -min(abs(signed_speed), max_speed_limit * 0.1)
+            if hasattr(window, '_jog_limit_hit'):
+                window._jog_limit_hit[servo_num - 1] = True
+            window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+            window[f'S{servo_num}_status_text'].update('At Min Limit', text_color='#FFA500')
+            sg.popup_error(f'Jog blocked: at lower limit {min_val} deg', keep_on_top=True)
+            return
 
-    pulses_speed = int(round(signed_speed * scaling * gearbox))
+    # [CHANGE 2026-03-27 10:15:00 -04:00] Use GUI jog amount (deg) for one-shot jog step.
+    step_pulses = int(round(jog_amount_deg * scaling * gearbox))
+    if step_pulses <= 0:
+        print(f'[DEBUG] Jog amount <= 0 for S{servo_num}; no move issued')
+        return
+    step_pulses *= sign
 
     if is_press:
-        cmd = f'JG{axis_letter}={pulses_speed};BG{axis_letter}'
+        cmd = f'PR{axis_letter}={step_pulses}'
         try:
             response = comm.send_command(cmd)
-            print(f'[DEBUG] JOG press command: {cmd} -> {response}')
+            print(f'[DEBUG] JOG one-shot command: {cmd} -> {response}')
+            if axis_letter == 'E':
+                # [CHANGE 2026-03-27 11:50:00 -04:00] Servo E PRE updates commanded cache; mirror it without applying a second delta.
+                jog_ok = not (
+                    response is False or
+                    (isinstance(response, str) and str(response).strip().upper().startswith('UNSUPPORTED'))
+                )
+                if jog_ok:
+                    sync_axis_e_actual_from_commanded(window, servo_num)
         except Exception as ex:
-            print(f'[DEBUG] Jog press failed: {ex}')
+            print(f'[DEBUG] Jog one-shot failed: {ex}')
     else:
         cmd = f'ST{axis_letter}'
         try:
@@ -1978,6 +2377,7 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
             print(f'[DEBUG] JOG release command: {cmd} -> {response}')
         except Exception as ex:
             print(f'[DEBUG] Jog release failed: {ex}')
+    return
 
 # Start the background polling thread using ControllerPolling
 # This line starts the background polling thread for the GUI. Specifically:
@@ -1985,7 +2385,8 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
 # This thread periodically polls the controller (using the comm object for Galil axes A-G and comm_h for MyActuator axis H) for status updates (like position, torque, enable/disable state) for each servo.
 # It sends these updates back to the GUI window using thread-safe events (such as POSITION_POLL).
 
-polling_thread, polling_stop_event = start_polling_thread(window, comm, comm_h)
+# [CHANGE 2026-03-24 14:54:00 -04:00] Include comm_e so Axis E polling uses ClearCore path.
+polling_thread, polling_stop_event = start_polling_thread(window, comm, comm_e, comm_h)
 
 # Main event loop (no periodic polling here)
 while True:
@@ -2005,6 +2406,7 @@ while True:
         continue
     if event == 'ESTOP':
         # Immediate stop for all axes
+        # [CHANGE 2026-03-24 16:18:00 -04:00] Send explicit per-axis stops for mixed-controller axes (E/H) in addition to global ST.
         # Cancel any in-flight DataPipe PR send
         if hasattr(window, '_dp_pr_stop') and window._dp_pr_stop:
             try:
@@ -2021,18 +2423,38 @@ while True:
             window['ALL_RUN_SEQUENCE'].update(disabled=False)
         if 'ALL_STOP_SEQUENCE' in window.AllKeysDict:
             window['ALL_STOP_SEQUENCE'].update(disabled=True)
+        stop_errors = []
+        # Main RSI/Galil path (A-D and any axes mapped there)
         if comm:
             try:
                 resp = comm.send_command('ST')
-                LAST_MOTION_COMMAND[:] = [None]*8
                 if not window_closed:
-                    window['DEBUG_LOG'].print(f'[ESTOP] Sent ST to all axes -> {resp}')
-                    for idx in range(1, 9):
-                        window[f'S{idx}_status_light'].update('●', text_color='#FF0000')
-                        window[f'S{idx}_status_text'].update('E-STOP', text_color='#FF0000')
+                    window['DEBUG_LOG'].print(f'[ESTOP] Sent ST to main controller -> {resp}')
             except Exception as ex:
-                sg.popup_error(f'E-STOP failed: {ex}', keep_on_top=True)
-        else:
+                stop_errors.append(f'main ST failed: {ex}')
+
+        # Explicit per-axis stop for mixed-controller axes
+        for axis_letter, servo_num in [('E', 5), ('H', 8)]:
+            try:
+                stop_key = f'S{servo_num}_stop'
+                stop_cmd = COMMAND_MAP.get(stop_key)
+                if stop_cmd:
+                    stop_cmd_val = stop_cmd if not callable(stop_cmd) else stop_cmd()
+                    stop_resp = send_axis_command(axis_letter, stop_cmd_val)
+                    if not window_closed:
+                        window['DEBUG_LOG'].print(f'[ESTOP] Sent {stop_cmd_val} to Axis {axis_letter} -> {stop_resp}')
+            except Exception as ex:
+                stop_errors.append(f'Axis {axis_letter} stop failed: {ex}')
+
+        LAST_MOTION_COMMAND[:] = [None]*8
+        if not window_closed:
+            for idx in range(1, 9):
+                window[f'S{idx}_status_light'].update('●', text_color='#FF0000')
+                window[f'S{idx}_status_text'].update('E-STOP', text_color='#FF0000')
+
+        if stop_errors and not window_closed:
+            sg.popup_error('E-STOP completed with errors:\n' + '\n'.join(stop_errors), keep_on_top=True)
+        elif (comm is None and comm_e is None and comm_h is None) and not window_closed:
             sg.popup_error('Controller communications not initialized.', keep_on_top=True)
         continue
     if event == 'ALL_SEQ_LOG':
@@ -2270,8 +2692,12 @@ while True:
         window._invalid_resp_counters = [0]*8
     if not hasattr(window, '_last_valid_pos'):
         window._last_valid_pos = ['']*8
+    if not hasattr(window, '_last_pos_update_ts'):
+        window._last_pos_update_ts = [None]*8
     if not hasattr(window, '_limit_tripped'):
         window._limit_tripped = [False]*8
+    if not hasattr(window, '_jog_limit_hit'):
+        window._jog_limit_hit = [False]*8
 
     # Sync per-servo description input to ALL tab label
     if isinstance(event, str) and event.startswith('S') and event.endswith('_desc'):
@@ -2305,6 +2731,22 @@ while True:
         else:
             print(f'[DEBUG] Invalid JOG_PRESS payload: {values.get(event)}')
         continue
+
+    if event == 'JOG_LIMIT_HIT':
+        try:
+            servo_num, which_limit = values.get(event, (None, None))
+            if servo_num is not None:
+                if hasattr(window, '_jog_limit_hit'):
+                    window._jog_limit_hit[int(servo_num) - 1] = True
+                if str(which_limit).lower() == 'max':
+                    window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+                    window[f'S{servo_num}_status_text'].update('At Max Limit', text_color='#FFA500')
+                else:
+                    window[f'S{servo_num}_status_light'].update('●', text_color='#FFA500')
+                    window[f'S{servo_num}_status_text'].update('At Min Limit', text_color='#FFA500')
+        except Exception as jog_limit_err:
+            print(f'[DEBUG] Failed to handle JOG_LIMIT_HIT: {jog_limit_err}')
+        continue
     if event == sg.WIN_CLOSED:
         window_closed = True
         if SEQ_STOP_EVENT is not None:
@@ -2314,6 +2756,11 @@ while True:
                 pass
         try:
             save_sequence_state_from_values(values)
+        except Exception:
+            pass
+        try:
+            # [CHANGE 2026-03-24 11:19:00 -04:00] Persist accel/decel for next startup.
+            save_motion_defaults_from_values(values)
         except Exception:
             pass
         break
@@ -2329,10 +2776,35 @@ while True:
             pos_val = None
             pos_val_deg = None
             valid = False
+            # [CHANGE 2026-03-27 11:35:00 -04:00] Axis E has no encoder; render Actual from commanded cache only.
+            axis_e_allow_update = True
+            axis_e_override_pulses = None
+            if axis_letter == 'E':
+                try:
+                    if comm_e is not None:
+                        commanded = getattr(comm_e, 'clearcore_commanded_position', None)
+                        if commanded is None:
+                            commanded = getattr(comm_e, 'clearcore_last_position', None)
+                        if commanded is not None:
+                            axis_e_override_pulses = float(commanded)
+                            pos_resp = str(commanded)
+                except Exception:
+                    pass
             # Log the raw response for debugging (optional)
             if not window_closed and LOG_POSITION_POLLS:
                 window['DEBUG_LOG'].print(f'Axis {axis_letter}: MG _RP{axis_letter} raw response: {raw_resp}')
-            if pos_resp is not None and str(pos_resp).strip() != ':' and str(pos_resp).strip() != '':
+            # [CHANGE 2026-03-24 15:40:00 -04:00] Disabled per-poll Servo 5 button-state query to prevent comm congestion/delays.
+            if axis_letter == 'E' and axis_e_allow_update and (pos_resp is None or str(pos_resp).strip() in (':', '')):
+                try:
+                    if comm_e is not None:
+                        commanded = getattr(comm_e, 'clearcore_commanded_position', None)
+                        if commanded is not None:
+                            pos_resp = str(commanded)
+                except Exception:
+                    pass
+            if axis_e_override_pulses is not None:
+                pos_resp = str(axis_e_override_pulses)
+            if axis_e_allow_update and pos_resp is not None and str(pos_resp).strip() != ':' and str(pos_resp).strip() != '':
                 try:
                     pos_val_pulses = float(pos_resp)
                     axis_units = AXIS_UNITS[axis_letter]
@@ -2346,6 +2818,7 @@ while True:
                         window[f'S{i}_actual_pos'].update(str(pos_val_disp))
                         update_setpoint_highlight(window, i, pos_val_deg)
                     window._last_valid_pos[i-1] = str(pos_val_disp)
+                    window._last_pos_update_ts[i-1] = time.time()
                     window._invalid_resp_counters[i-1] = 0
                     valid = True
                 except Exception:
@@ -2371,10 +2844,12 @@ while True:
                 if (beyond_soft_limit or beyond_absolute_limit) and not window._limit_tripped[i-1]:
                     stop_key = f'S{i}_stop'
                     stop_cmd = COMMAND_MAP.get(stop_key)
-                    if stop_cmd and comm:
+                    controller = get_comm_for_axis(axis_letter)
+                    # [CHANGE 2026-03-24 16:24:00 -04:00] Route safety limit-stop through per-axis comm path so E/H stop on their native controllers.
+                    if stop_cmd and controller:
                         try:
                             stop_cmd_val = stop_cmd if not callable(stop_cmd) else stop_cmd()
-                            comm.send_command(stop_cmd_val)
+                            send_axis_command(axis_letter, stop_cmd_val)
                             # Clear motion command tracking
                             LAST_MOTION_COMMAND[i-1] = None
                             if not window_closed:
@@ -2392,13 +2867,19 @@ while True:
                         except Exception:
                             if not window_closed:
                                 window['DEBUG_LOG'].print(f'[ERROR] Failed to send stop for axis {axis_letter}')
-                    elif not comm and not window_closed:
+                    elif not controller and not window_closed:
                         window['DEBUG_LOG'].print(f'[WARN] Axis {axis_letter} exceeded limits but comm not initialized; no stop sent')
                         sg.popup_ok(f'Axis {axis_letter} exceeded limits ({min_val} to {max_val}) but comm not initialized; stop not sent.', keep_on_top=True, title='')
                     window._limit_tripped[i-1] = True
                 elif window._limit_tripped[i-1] and min_val <= pos_val_deg <= max_val:
                     # Clear limit indicator when back inside bounds
                     window._limit_tripped[i-1] = False
+                    if not window_closed:
+                        window[f'S{i}_status_light'].update('●', text_color='#00FF00')
+                        window[f'S{i}_status_text'].update('Enabled', text_color='#00FF00')
+                elif window._jog_limit_hit[i-1] and min_val < pos_val_deg < max_val:
+                    # Clear jog limit indicator when back inside absolute bounds
+                    window._jog_limit_hit[i-1] = False
                     if not window_closed:
                         window[f'S{i}_status_light'].update('●', text_color='#00FF00')
                         window[f'S{i}_status_text'].update('Enabled', text_color='#00FF00')
@@ -2439,6 +2920,20 @@ while True:
             # Route to correct comm object
             response = send_axis_command(axis_letter, dp_cmd)
             print(f'[DEBUG] Response: {response}')
+            if axis_letter == 'E':
+                # [CHANGE 2026-03-27 11:20:00 -04:00] Servo E zero immediately resets displayed/cached commanded position.
+                zero_ok = not (
+                    response is False or
+                    (isinstance(response, str) and str(response).strip().upper().startswith('UNSUPPORTED'))
+                )
+                if zero_ok:
+                    try:
+                        if comm_e is not None:
+                            setattr(comm_e, 'clearcore_last_position', 0)
+                            setattr(comm_e, 'clearcore_commanded_position', 0)
+                        sync_axis_e_actual_from_commanded(window, servo_num)
+                    except Exception:
+                        pass
         except Exception as e:
             sg.popup_error(f'Error parsing servo number: {e}', keep_on_top=True)
         continue
@@ -2462,7 +2957,7 @@ while True:
             min_val, max_val = get_limits(axis_letter, field)
         else:
             min_val, max_val = NUMERIC_LIMITS.get(field, (0, 54000))
-        unit_label = 'DPS' if field == 'speed' else ('DPS^2' if field in ['accel', 'decel'] else ('Deg' if field in ['abs_pos', 'rel_pos'] else ''))
+        unit_label = 'DPS' if field == 'speed' else ('DPS^2' if field in ['accel', 'decel'] else ('Deg' if field in ['abs_pos', 'rel_pos', 'jog_amount'] else ''))
         # Make popup title more descriptive with setpoint type
         field_titles = {
             'speed': 'Speed',
@@ -2470,6 +2965,7 @@ while True:
             'decel': 'Deceleration',
             'abs_pos': 'Absolute Position',
             'rel_pos': 'Relative Position',
+            'jog_amount': 'Jog Amount',
         }
         field_title = field_titles.get(field, field.capitalize())
         popup_title = f'Enter {field_title} for Servo {servo} ({unit_label})'
@@ -2567,6 +3063,17 @@ while True:
         # Otherwise, handle direct motor control buttons (Enable, Disable, Start, Stop, Jog) by reusing handle_servo_event
         # to ensure a single code path with consistent scaling logic.
         parts = event.split('_')
+        if len(parts) == 3 and parts[1] == 'jog' and parts[2] in ('cw', 'ccw'):
+            # [CHANGE 2026-03-24 13:36:00 -04:00] Safety: jog buttons are one-shot pulses only (no release event dependency).
+            servo_num = parts[0][1:]
+            if not str(servo_num).isdigit():
+                continue
+            servo_num_int = int(servo_num)
+            direction = parts[2]
+            axis_letter = AXIS_LETTERS[servo_num_int - 1]
+            window['DEBUG_LOG'].print(f'Button clicked: S{servo_num}_jog_{direction} (Axis {axis_letter}) [one-shot]')
+            handle_jog_press(window, servo_num_int, direction, True, values)
+            continue
         if len(parts) == 2:
             servo_num = parts[0][1:]
             if not str(servo_num).isdigit():
