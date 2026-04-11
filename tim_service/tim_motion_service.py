@@ -38,14 +38,20 @@ logger = logging.getLogger(__name__)
 
 def load_config(config_path):
     """Load YAML configuration file."""
-    if not Path(config_path).exists():
-        logger.error(f"Config file not found: {config_path}")
+    config_file = Path(config_path)
+    if not config_file.is_absolute():
+        # [CHANGE 2026-04-11 12:08:00 -04:00] Resolve relative config paths from this script's folder.
+        # This keeps startup reliable even when launched outside tim_service/.
+        config_file = Path(__file__).resolve().parent / config_file
+
+    if not config_file.exists():
+        logger.error(f"Config file not found: {config_file}")
         sys.exit(1)
     
-    with open(config_path, 'r') as f:
+    with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
     
-    logger.info(f"Loaded configuration from {config_path}")
+    logger.info(f"Loaded configuration from {config_file}")
     return config
 
 

@@ -10,6 +10,9 @@ This adapter manages the deterministic 1 kHz EtherCAT motion control loop.
 
 import logging
 import re
+import importlib
+import importlib.util
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +43,11 @@ class RapidCodeAdapter:
     def _init_rapidcode(self):
         """Initialize real RapidCode connection."""
         try:
-            from RSI.RapidCode import *
-            
+            rapidcode_module = importlib.import_module('RSI.RapidCode')
+            motion_controller_cls = getattr(rapidcode_module, 'MotionController')
+
             # Create motion controller
-            self.rmp = MotionController()
+            self.rmp = motion_controller_cls()
             
             # Connect to real hardware
             self.rmp.Connect()
@@ -62,7 +66,17 @@ class RapidCodeAdapter:
     def _init_phantom_rapidcode(self):
         """Initialize mock RapidCode for testing."""
         # Create a mock RapidCode controller
-        from tests.test_mock_rapidcode import MockMotionController
+        try:
+            from tests.test_mock_rapidcode import MockMotionController
+        except Exception:
+            # Fallback for environments where "tests" resolves to an external package.
+            mock_path = Path(__file__).resolve().parent / 'tests' / 'test_mock_rapidcode.py'
+            spec = importlib.util.spec_from_file_location('tim_mock_rapidcode', str(mock_path))
+            if spec is None or spec.loader is None:
+                raise ImportError(f'Could not load mock module from {mock_path}')
+            mock_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mock_module)
+            MockMotionController = mock_module.MockMotionController
         self.rmp = MockMotionController()
         logger.info("Mock RapidCode controller initialized")
     

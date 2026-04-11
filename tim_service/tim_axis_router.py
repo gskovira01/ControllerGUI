@@ -11,6 +11,7 @@ Translates commands like "PA A=45" into RapidCode calls for motion execution.
 """
 
 import logging
+import re
 from tim_rapidcode_adapter import RapidCodeAdapter
 from tim_clearcore_adapter import ClearCoreAdapter
 
@@ -35,13 +36,13 @@ class AxisRouter:
         
         # Initialize hardware adapters
         self.rapidcode = RapidCodeAdapter(
-            config=config.get('rapidcode', {}),
+            config=self.config.get('rapidcode', {}),
             phantom_mode=phantom_mode,
             watchdog=watchdog
         )
         
         self.clearcore = ClearCoreAdapter(
-            config=config.get('clearcore', {}),
+            config=self.config.get('clearcore', {}),
             phantom_mode=phantom_mode,
             watchdog=watchdog
         )
@@ -92,14 +93,21 @@ class AxisRouter:
         Returns:
             Axis letter ('A'-'H') or None
         """
-        # Common patterns: "CMD A", "CMD A=value", "CMD_XPA"
-        for i, char in enumerate(command):
-            if char in 'ABCDEFGH':
-                # Verify it looks like an axis reference
-                # (preceded by space, '=', or underscore)
-                if i == 0 or command[i-1] in (' ', '=', '_'):
-                    return char
-        
+        # [CHANGE 2026-04-11 12:09:00 -04:00] Parse explicit MG/TP query suffix axis first.
+        mg_match = re.search(r'\b(?:MG\s+_\w+|TP\s+_?\w*)([A-H])\b', command)
+        if mg_match:
+            return mg_match.group(1)
+
+        # Commands with explicit axis token: "SH A", "PA A=45", "DP A"
+        token_match = re.match(r'^\s*[A-Z_]+\s+([A-H])(?:\b|\s*=|=)', command)
+        if token_match:
+            return token_match.group(1)
+
+        # Compact commands with axis suffix: "SHE", "MOE", "DPA", "PRA=10"
+        compact_match = re.match(r'^\s*(?:SH|MO|ST|DP|TP|PA|PR|SP|AC|DC)([A-H])(?:\b|=)', command)
+        if compact_match:
+            return compact_match.group(1)
+
         return None
     
     def shutdown(self):
