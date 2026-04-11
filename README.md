@@ -44,6 +44,24 @@ A touchscreen-friendly GUI application for controlling 8-axis motion systems wit
 
 ---
 
+## TIM Motion Service (iPC400)
+
+The **TIM Motion Service** is the motion control gateway that runs on the iPC400 (TIM-PC) and owns all hardware I/O.
+
+**See [tim_service/README.md](tim_service/README.md)** for:
+- Service architecture and startup
+- Configuration and deployment
+- Testing with phantom/mock hardware
+- Network share setup (edit code from your laptop)
+
+Quick start:
+```powershell
+cd tim_service
+python tim_motion_service.py --phantom --debug
+```
+
+---
+
 ## Installation & Setup
 
 ### 1. Install Python 3.10

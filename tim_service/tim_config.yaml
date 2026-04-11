@@ -1,0 +1,99 @@
+# TIM Motion Service Configuration
+# ==================================
+# Configure hardware connections, motion limits, and safety parameters
+
+service:
+  name: "TIM Motion Service"
+  version: "1.0"
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  
+server:
+  host: "0.0.0.0"
+  port: 503
+  max_clients: 5
+  client_timeout_sec: 5
+
+# RapidCode configuration (Axes A-D: EtherCAT)
+rapidcode:
+  # Connection settings
+  ethercat_interface: "Ethernet 1"  # Adjust to your EtherCAT master interface
+  
+  # Phantom mode (for testing without hardware)
+  phantom_mode: false
+  
+  # Axis configuration
+  axes:
+    A:
+      name: "Primary Rotation X12"
+      min_pos: 0
+      max_pos: 180
+      software_limit_deg: 180
+      speed_min_dps: 0
+      speed_max_dps: 360
+      accel_min_dps2: 0
+      accel_max_dps2: 720
+    B:
+      name: "Secondary Rotation X8"
+      min_pos: 0
+      max_pos: 180
+      software_limit_deg: 180
+      speed_min_dps: 0
+      speed_max_dps: 360
+      accel_min_dps2: 0
+      accel_max_dps2: 720
+    C:
+      name: "Tertiary Rotation X8"
+      min_pos: 0
+      max_pos: 160
+      software_limit_deg: 160
+      speed_min_dps: 0
+      speed_max_dps: 360
+      accel_min_dps2: 0
+      accel_max_dps2: 720
+    D:
+      name: "Tertiary Lift X12"
+      min_pos: 0
+      max_pos: 160
+      software_limit_deg: 160
+      speed_min_dps: 0
+      speed_max_dps: 360
+      accel_min_dps2: 0
+      accel_max_dps2: 720
+
+# ClearCore configuration (Axis E: Steering/Address Angle)
+clearcore:
+  ip_address: "192.168.1.171"
+  port: 8888
+  
+  # Phantom mode (for testing without hardware)
+  phantom_mode: false
+  
+  # Axis configuration
+  axis_e:
+    name: "Address Angle (ClearCore Servo 5)"
+    min_pos: 0
+    max_pos: 45
+    software_limit_deg: 45
+    speed_min_dps: 0
+    speed_max_dps: 100
+    accel_min_dps2: 0
+    accel_max_dps2: 100
+
+# Safety settings
+safety:
+  enabled: true
+  watchdog_timeout_sec: 10  # Disconnect safety timeout
+  motion_timeout_sec: 30    # Max motion duration before forced stop
+  enable_fault_logging: true
+  
+  # E-stop behavior
+  estop:
+    action: "STOP"  # STOP or DISABLE (stop motion vs disable servos)
+    ramp_time_ms: 100
+
+# Development & testing
+development:
+  mock_rapidcode: true    # Use mock RapidCode (set false for real hardware)
+  mock_clearcore: false   # Use mock ClearCore
+  verbose_logging: false  # Extra debug output
+  log_all_commands: true  # Log every command/response
