@@ -4,7 +4,8 @@
 
 # Core dependencies
 pyyaml>=6.0              # Configuration file parsing
-numpy>=1.22.0            # RapidCode requirement (if using real hardware)
+# [CHANGE 2026-04-11 12:50:00 -05:00] RSI RapidCode Python extension requires NumPy 1.x ABI
+numpy>=1.22.0,<2         # RapidCode requirement (if using real hardware)
 
 # Optional: for real RapidCode (installed separately from RSI)
 # RSI RapidCode should be installed at C:\RSI\10.7.1 (Windows) or equivalent
