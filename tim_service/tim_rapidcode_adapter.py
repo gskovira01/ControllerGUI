@@ -9,9 +9,11 @@ This adapter manages the deterministic 1 kHz EtherCAT motion control loop.
 """
 
 import logging
+import os
 import re
 import importlib
 import importlib.util
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,16 +53,24 @@ class RapidCodeAdapter:
     
     def _init_rapidcode(self):
         """Initialize real RapidCode connection."""
-        import sys
-
-        # [CHANGE 2026-04-11] Add RSI 11.x install path so RapidCodePython is importable
+        # [CHANGE 2026-04-11 16:20:00 -05:00] Add RSI 11.x and INtime runtime paths in-process
         rsi_path = r'C:\RSI\11.0.3'
-        if rsi_path not in sys.path:
-            sys.path.insert(0, rsi_path)
+        intime_bin_path = r'C:\Program Files (x86)\INtime\bin'
+        for extra_path in (rsi_path, intime_bin_path):
+            if extra_path not in sys.path:
+                sys.path.insert(0, extra_path)
+            os.environ['PATH'] = extra_path + os.pathsep + os.environ.get('PATH', '')
+
+        for dll_path in (rsi_path, intime_bin_path):
+            try:
+                os.add_dll_directory(dll_path)
+            except (AttributeError, FileNotFoundError, OSError):
+                pass
 
         # Try RapidCodePython (RSI 11.x on-disk layout) first, fall back to RSI.RapidCode
         rapidcode_module = None
         motion_controller_cls = None
+        import_errors = []
         for mod_name, cls_name in [
             ('RapidCodePython', 'MotionController'),
             ('RSI.RapidCode',   'MotionController'),
@@ -71,11 +81,14 @@ class RapidCodeAdapter:
                 if motion_controller_cls is not None:
                     logger.info(f"RapidCode SDK loaded via '{mod_name}'")
                     break
-            except ImportError:
+            except ImportError as exc:
+                import_errors.append(f"{mod_name}: {exc}")
                 continue
 
         if motion_controller_cls is None:
             logger.error("RapidCode SDK not found. Install RSI RapidCode 10.7.1+")
+            if import_errors:
+                logger.error("RapidCode import attempts failed: %s", '; '.join(import_errors))
             raise ImportError("No module named 'RSI'")
 
         try:
