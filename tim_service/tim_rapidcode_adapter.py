@@ -51,23 +51,42 @@ class RapidCodeAdapter:
     
     def _init_rapidcode(self):
         """Initialize real RapidCode connection."""
-        try:
-            rapidcode_module = importlib.import_module('RSI.RapidCode')
-            motion_controller_cls = getattr(rapidcode_module, 'MotionController')
+        import sys
 
-            # Create motion controller
+        # [CHANGE 2026-04-11] Add RSI 11.x install path so RapidCodePython is importable
+        rsi_path = r'C:\RSI\11.0.3'
+        if rsi_path not in sys.path:
+            sys.path.insert(0, rsi_path)
+
+        # Try RapidCodePython (RSI 11.x on-disk layout) first, fall back to RSI.RapidCode
+        rapidcode_module = None
+        motion_controller_cls = None
+        for mod_name, cls_name in [
+            ('RapidCodePython', 'MotionController'),
+            ('RSI.RapidCode',   'MotionController'),
+        ]:
+            try:
+                rapidcode_module = importlib.import_module(mod_name)
+                motion_controller_cls = getattr(rapidcode_module, cls_name, None)
+                if motion_controller_cls is not None:
+                    logger.info(f"RapidCode SDK loaded via '{mod_name}'")
+                    break
+            except ImportError:
+                continue
+
+        if motion_controller_cls is None:
+            logger.error("RapidCode SDK not found. Install RSI RapidCode 10.7.1+")
+            raise ImportError("No module named 'RSI'")
+
+        try:
+            # Create motion controller and connect to real hardware
             self.rmp = motion_controller_cls()
-            
-            # Connect to real hardware
             self.rmp.Connect()
             logger.info("RapidCode connected to real hardware")
-            
+
             # Discover and enable EtherCAT slaves
             # TODO: Implement EtherCAT slave discovery
-            
-        except ImportError:
-            logger.error("RapidCode SDK not found. Install RSI RapidCode 10.7.1+")
-            raise
+
         except Exception as e:
             logger.error(f"Failed to initialize RapidCode: {e}")
             raise
