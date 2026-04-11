@@ -296,6 +296,120 @@ Each poll sends a Galil-style query command and waits for a numeric response. Th
 
 ---
 
+## Development Environment
+
+### GUI PC Development (Operator Interface)
+**Your Primary Development Machine** (Laptop / Windows PC)
+
+- **IDE**: VS Code with Python extension
+- **Location**: `d:\Python\ControllerGUI\`
+- **Venv**: `venv_rmp311` (or create GUI-specific venv)
+- **Workflow**: Edit python files, test locally with mock/phantom hardware, commit to GitHub
+- **Testing**: Can start TIM Motion Service mockup locally for integration testing
+
+### iPC400 Development (TIM Motion Service)
+
+**Recommended Setup: VS Code Native on iPC400**
+
+- **IDE**: VS Code installed directly on iPC400 (recommended)
+- **Location**: `C:\TIM\` or `C:\tim-motion-service\`
+- **Venv**: Dedicated Python venv on iPC400 for TIM service
+- **Workflow**: 
+  - Develop code directly on iPC400 using VS Code (native speed, full hardware access)
+  - Test against real RapidCode SDK when hardware is available
+  - RDP or direct console for service deployment/debugging
+  - Git operations via CMD/PowerShell on iPC400
+- **Size**: VS Code is ~500MB; iPC400 has plenty of space
+
+**Why Native VS Code on iPC400 vs RDP?**
+- **RDP**: Can feel sluggish over network, screen lag during coding
+- **Native VS Code**: Full speed, instant feedback, direct RapidCode debugging
+- **Best practice**: Install VS Code on iPC400 once, develop there directly
+
+**Optional: VS Code Remote SSH (Phase 3+)**
+- When iPC400 migrates to Linux for real-time kernel (Phase 3), you can use VS Code Remote SSH development
+- Allows developing on your laptop with iPC400 as the backend
+- Requires SSH server on iPC400 (native in Linux, optional in Windows)
+- Not needed for initial Windows-based development
+
+### Repository Structure
+
+```
+GitHub (ControllerGUI repo):
+├── gui_pc/                          # GUI side (your laptop)
+│   ├── ControllerGUI.py
+│   ├── communications.py
+│   ├── ControllerPolling.py
+│   ├── numeric_keypad.py
+│   ├── controller_config.ini
+│   ├── README.md
+│   └── venv_rmp311/
+│
+├── tim_service/                     # iPC400 motion service (separate venv)
+│   ├── tim_motion_service.py        # Main service entry point
+│   ├── tim_motion_server.py         # TCP listener (port 503)
+│   ├── tim_rapidcode_adapter.py     # RapidCode A-D wrapper
+│   ├── tim_clearcore_adapter.py     # ClearCore E dispatcher
+│   ├── tim_axis_router.py           # Command router by axis
+│   ├── tim_config.yaml              # Service configuration
+│   ├── tim_safety_watchdog.py       # Fault & watchdog manager
+│   ├── tests/
+│   │   ├── test_mock_rapidcode.py   # Mock RapidCode for testing
+│   │   ├── test_axis_router.py
+│   │   └── test_galil_translator.py
+│   ├── requirements.txt             # TIM service dependencies
+│   └── venv/                        # iPC400 local venv
+│
+├── TIM_SYSTEM_DESIGN.md             # This document
+├── .gitignore
+└── README.md
+```
+
+### Development Workflow
+
+**Phase 1: GUI & Service Development (Parallel)**
+
+| Task | Location | Tool |
+|------|----------|------|
+| Edit GUI code | GUI PC | VS Code |
+| Test GUI locally | GUI PC | Python + mock service |
+| Edit TIM service | iPC400 | VS Code (native) |
+| Test service with mock RapidCode | iPC400 | Python + phantom axes |
+| Integration test (GUI ↔ service) | Network | Both machines |
+| Version control | Both machines | Git CLI |
+
+**Phase 2: Hardware Integration Testing**
+
+- RDP into iPC400 for service monitoring/debugging if needed
+- Or work directly at iPC400 console with hardware
+- GUI PC connects to iPC400 over network (192.168.1.100:503) for motion tests
+
+**Phase 3: Production Deployment**
+
+- iPC400 runs TIM service as Windows Service (auto-start)
+- Updates via Git pull + service restart
+- Monitoring via logs or optional SSH (if migrated to Linux)
+
+### Python Environment Checklist
+
+**GUI PC (d:\Python\ControllerGUI)**
+- [ ] Python 3.10+
+- [ ] FreeSimpleGUI
+- [ ] NumPy 1.22.0
+- [ ] PySerial (if needed)
+- [ ] requests (for socket communication)
+
+**iPC400 (C:\TIM)**
+- [ ] Python 3.10+
+- [ ] RSI RapidCode SDK 10.7.1+ installed at C:\RSI\10.7.1
+- [ ] NumPy (RapidCode requirement)
+- [ ] PyYAML (for config files)
+- [ ] requests (for HTTP helpers)
+- [ ] pytest (for unit tests)
+- [ ] VS Code with Python extension (optional but recommended)
+
+---
+
 ## File Structure & Modules
 
 ```

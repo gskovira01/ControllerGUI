@@ -70,6 +70,29 @@ class TestAxisRouter:
         response = router.dispatch("PA E=30")
         assert response == "1"  # Success
 
+    # [CHANGE 2026-04-11 12:33:00 -05:00] Verify stateful RapidCode phantom readback.
+    def test_dispatch_rapidcode_position_query_reflects_move(self, router):
+        """Position query should reflect the last commanded phantom move."""
+        router.dispatch("SH A")
+        router.dispatch("PA A=45")
+        response = router.dispatch("MG _RPA")
+        assert response == "45.0"
+
+    def test_dispatch_rapidcode_speed_query_reflects_setpoint(self, router):
+        """Speed query should reflect SP command in phantom mode."""
+        router.dispatch("SP A=123")
+        response = router.dispatch("MG _SPA")
+        assert response == "123.0"
+
+    def test_dispatch_rapidcode_status_query_reflects_enable_disable(self, router):
+        """Enable status query should follow SH/MO commands in phantom mode."""
+        router.dispatch("SH A")
+        enabled = router.dispatch("MG _MOA")
+        router.dispatch("MO A")
+        disabled = router.dispatch("MG _MOA")
+        assert enabled == "1"
+        assert disabled == "0"
+
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

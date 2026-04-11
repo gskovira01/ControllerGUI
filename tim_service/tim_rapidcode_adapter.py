@@ -39,6 +39,15 @@ class RapidCodeAdapter:
         else:
             logger.info("RapidCode adapter in PHANTOM MODE (mock)")
             self._init_phantom_rapidcode()
+
+    def _get_mock_axis(self, axis_idx):
+        """Return the mock axis object for phantom mode, or None."""
+        if not self.phantom_mode or not self.rmp:
+            return None
+        try:
+            return self.rmp.Axis(axis_idx)
+        except Exception:
+            return None
     
     def _init_rapidcode(self):
         """Initialize real RapidCode connection."""
@@ -159,7 +168,11 @@ class RapidCodeAdapter:
         """Enable axis."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode enable
+                # [CHANGE 2026-04-11 12:33:00 -05:00] Use mock axis state in phantom mode.
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.Enable()
+                # TODO: Call RapidCode enable for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} enabled")
             return "1"
         except Exception as e:
@@ -170,7 +183,10 @@ class RapidCodeAdapter:
         """Disable axis."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode disable
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.Disable()
+                # TODO: Call RapidCode disable for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} disabled")
             return "0"
         except Exception as e:
@@ -181,7 +197,10 @@ class RapidCodeAdapter:
         """Absolute position move."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode move absolute
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.MoveAbsolute(value)
+                # TODO: Call RapidCode move absolute for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} absolute move to {value}")
             return "1"
         except Exception as e:
@@ -192,7 +211,10 @@ class RapidCodeAdapter:
         """Relative position move."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode move relative
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.MoveRelative(value)
+                # TODO: Call RapidCode move relative for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} relative move by {value}")
             return "1"
         except Exception as e:
@@ -203,7 +225,10 @@ class RapidCodeAdapter:
         """Set axis speed."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode set speed
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.SetVelocity(value)
+                # TODO: Call RapidCode set speed for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} speed set to {value}")
             return "1"
         except Exception as e:
@@ -214,7 +239,10 @@ class RapidCodeAdapter:
         """Set axis acceleration."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode set accel
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.SetAcceleration(value)
+                # TODO: Call RapidCode set accel for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} accel set to {value}")
             return "1"
         except Exception as e:
@@ -225,7 +253,10 @@ class RapidCodeAdapter:
         """Set axis deceleration (treated as accel in many systems)."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode set decel
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.SetDeceleration(value)
+                # TODO: Call RapidCode set decel for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} decel set to {value}")
             return "1"
         except Exception as e:
@@ -236,7 +267,10 @@ class RapidCodeAdapter:
         """Clear position (zero the axis)."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode clear position
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.ClearPosition()
+                # TODO: Call RapidCode clear position for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} position cleared")
             return "1"
         except Exception as e:
@@ -247,8 +281,12 @@ class RapidCodeAdapter:
         """Query actual position."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode get position
-                position = 0.0  # placeholder
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    position = mock_axis.GetPosition()
+                    return str(position)
+                # TODO: Call RapidCode get position for real hardware path
+                position = 0.0
                 return str(position)
             return "0"
         except Exception as e:
@@ -259,8 +297,12 @@ class RapidCodeAdapter:
         """Query enable/disable status."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode get enable status
-                status = 1  # 1 = enabled, 0 = disabled
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    status = 1 if mock_axis.IsEnabled() else 0
+                    return str(status)
+                # TODO: Call RapidCode get enable status for real hardware path
+                status = 1
                 return str(status)
             return "0"
         except Exception as e:
@@ -271,7 +313,11 @@ class RapidCodeAdapter:
         """Query current speed."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode get speed
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    speed = mock_axis.GetVelocity()
+                    return str(speed)
+                # TODO: Call RapidCode get speed for real hardware path
                 speed = 0.0
                 return str(speed)
             return "0"
@@ -283,7 +329,10 @@ class RapidCodeAdapter:
         """Stop axis motion."""
         try:
             if self.rmp:
-                # TODO: Call RapidCode stop
+                mock_axis = self._get_mock_axis(axis_idx)
+                if mock_axis is not None:
+                    mock_axis.Stop()
+                # TODO: Call RapidCode stop for real hardware path
                 logger.info(f"Axis {chr(65+axis_idx)} stopped")
             return "1"
         except Exception as e:

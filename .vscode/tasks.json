@@ -1,0 +1,10 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Backup ControllerGUI.py locally",
+			"type": "shell",
+			"command": "copy ControllerGUI.py ControllerGUI_backup.py"
+		}
+	]
+}

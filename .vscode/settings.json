@@ -1,4 +1,12 @@
 {
+  // [CHANGE 2026-03-26 20:27:38 -04:00] Pin workspace interpreter to local venv.
+  "python.defaultInterpreterPath": ".\\venv_rmp311\\Scripts\\python.exe",
+  "python.autoComplete.extraPaths": [
+    "D:\\RSI\\10.7.1"
+  ],
+  "python.analysis.extraPaths": [
+    "D:\\RSI\\10.7.1"
+  ],
   "C_Cpp_Runner.cCompilerPath": "gcc",
   "C_Cpp_Runner.cppCompilerPath": "g++",
   "C_Cpp_Runner.debuggerPath": "gdb",
