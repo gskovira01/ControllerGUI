@@ -5,13 +5,17 @@ Background polling thread for servo position, torque, and enable/disable status.
 Intended for use with ControllerGUI.py.
 
 Exports:
-    start_polling_thread(window, comm)
+    start_polling_thread(window, comm, comm_e=None, comm_h=None)
         - Starts the polling thread and returns the thread object.
+    start_comm_health_thread(window, comm, comm_e=None, comm_h=None, interval=5.0)
+        - Starts comm-link health polling and returns (thread, stop_event).
 """
 import threading
 import time
 import re
 import queue
+import subprocess
+import os
 
 
 def _extract_numeric_response(resp_str):
@@ -59,7 +63,8 @@ def polling_thread_func(window, comm, comm_e, comm_h, stop_event):
     
     Args:
         window: PySimpleGUI window object
-        comm: Galil controller comm object (axes A-G)
+        comm: Primary TCP controller comm object (TIM/RSI path for A-D)
+        comm_e: ClearCore comm object (axis E)
         comm_h: MyActuator comm object (axis H)
         stop_event: Threading event to stop the polling loop
     """
@@ -235,11 +240,147 @@ def start_polling_thread(window, comm, comm_e=None, comm_h=None):
     
     Args:
         window: PySimpleGUI window object
-        comm: Galil controller comm object (axes A-G)
+        comm: Primary TCP controller comm object (TIM/RSI path for A-D)
         comm_e: ClearCore comm object (axis E), optional
         comm_h: MyActuator comm object (axis H), optional
     """
     stop_event = threading.Event()
     thread = threading.Thread(target=polling_thread_func, args=(window, comm, comm_e, comm_h, stop_event), daemon=True)
+    thread.start()
+    return thread, stop_event
+
+
+# [CHANGE 2026-04-17 00:00:00 -04:00] Comm health polling thread: periodically pings each controller and reports link status.
+
+# Which servo numbers belong to each controller group:
+#   Primary TCP service (comm): S1-S4 (axes A-D)
+#   ClearCore (comm_e): S5 (axis E)
+#   MyActuator (comm_h): S8 (axis H)
+#   Servos 6, 7: no comm object assigned → always 'unconfigured'
+_RSI_SERVOS       = [1, 2, 3, 4]
+_CLEARCORE_SERVOS = [5]
+_MYACTUATOR_SERVOS = [8]
+_UNCONFIGURED_SERVOS = [6, 7]
+
+
+def _ping_rsi(comm):
+    """Send a lightweight Galil query and return True if a valid reply arrives."""
+    try:
+        resp = comm.send_command('MG _GN')
+        # A numeric string or any non-False/non-None reply counts as alive.
+        return resp is not False and resp is not None
+    except Exception:
+        return False
+
+
+def _ping_host(ip_address, timeout_seconds=0.8):
+    """Return True when the controller host is reachable at the network layer."""
+    if not ip_address:
+        return False
+    try:
+        timeout_ms = max(1, int(timeout_seconds * 1000))
+        if os.name == 'nt':
+            cmd = ['ping', '-n', '1', '-w', str(timeout_ms), str(ip_address)]
+        else:
+            timeout_s = max(1, int(round(timeout_seconds)))
+            cmd = ['ping', '-c', '1', '-W', str(timeout_s), str(ip_address)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=max(2.0, timeout_seconds + 1.0))
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _ping_clearcore(comm_e):
+    """Ping ClearCore and require either a real controller reply or network reachability."""
+    try:
+        # [CHANGE 2026-04-17 00:00:00 -04:00] A UDP send alone cannot detect unplugged cable.
+        # Prefer an actual controller reply; if the device is quiet, fall back to OS-level ping.
+        resp = comm_e.send_command('REQUEST_BUTTON_STATES')
+        resp_text = '' if resp is None else str(resp).strip()
+        if resp not in (False, None) and resp_text not in ('', '0'):
+            return True
+    except Exception:
+        pass
+
+    return _ping_host(getattr(comm_e, 'clearcore_ip', None), timeout_seconds=0.8)
+
+
+def _ping_myactuator(comm_h):
+    """Ping MyActuator without invoking incomplete command paths that spam the terminal."""
+    try:
+        if not hasattr(comm_h, '_myact_send_command'):
+            return False
+        resp = comm_h.send_command('MG _RPA')
+        return resp is not False and resp is not None
+    except Exception:
+        return False
+
+
+def comm_health_thread_func(window, comm, comm_e, comm_h, stop_event, interval=5.0):
+    """
+    Periodically pings each controller and posts a COMM_HEALTH event to the GUI.
+    Payload: dict mapping servo_num -> {'ok': bool, 'label': str}
+    """
+    while not stop_event.is_set():
+        health = {}
+
+        # RSI (axes 1-4)
+        if comm is not None:
+            ok = _ping_rsi(comm)
+            label = 'Comms OK' if ok else 'No Link'
+            for s in _RSI_SERVOS:
+                health[s] = {'ok': ok, 'label': label}
+        else:
+            for s in _RSI_SERVOS:
+                health[s] = {'ok': None, 'label': 'No Link'}
+
+        # ClearCore (axis 5)
+        if comm_e is not None:
+            ok = _ping_clearcore(comm_e)
+            label = 'Comms OK' if ok else 'No Link'
+            for s in _CLEARCORE_SERVOS:
+                health[s] = {'ok': ok, 'label': label}
+        else:
+            for s in _CLEARCORE_SERVOS:
+                health[s] = {'ok': None, 'label': 'No Link'}
+
+        # MyActuator (axis 8)
+        if comm_h is not None:
+            ok = _ping_myactuator(comm_h)
+            label = 'Comms OK' if ok else 'No Link'
+            for s in _MYACTUATOR_SERVOS:
+                health[s] = {'ok': ok, 'label': label}
+        else:
+            for s in _MYACTUATOR_SERVOS:
+                health[s] = {'ok': None, 'label': 'No Link'}
+
+        # Unconfigured servos
+        for s in _UNCONFIGURED_SERVOS:
+            health[s] = {'ok': None, 'label': 'No Link'}
+
+        try:
+            window.write_event_value('COMM_HEALTH', health)
+        except Exception:
+            pass
+
+        # Sleep in short increments so stop_event is respected promptly
+        elapsed = 0.0
+        while elapsed < interval and not stop_event.is_set():
+            time.sleep(0.25)
+            elapsed += 0.25
+
+
+def start_comm_health_thread(window, comm, comm_e=None, comm_h=None, interval=5.0):
+    """
+    Starts the comm health polling thread. Returns (thread, stop_event).
+    interval: seconds between pings (default 5).
+    """
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=comm_health_thread_func,
+        args=(window, comm, comm_e, comm_h, stop_event),
+        kwargs={'interval': interval},
+        daemon=True
+    )
     thread.start()
     return thread, stop_event

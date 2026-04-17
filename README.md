@@ -1,12 +1,16 @@
-# ControllerGUI - Multi-Axis Motion Controller Interface
+# ControllerGUI - TIM Multi-Axis Motion Interface
 
-A touchscreen-friendly GUI application for controlling 8-axis motion systems with support for mixed controller types (Galil DMC-4180 + MyActuator RMD-X8 motors).
+Touchscreen-friendly operator GUI for TIM with mixed routing:
+- Axes A-D: iPC400 TIM Motion Service (TCP/503)
+- Axis E: ClearCore UDP (direct from GUI in current deployment)
+- Axis H: legacy MyActuator path (optional / not primary for TIM)
 
 ## System Overview
 
 **ControllerGUI** provides a unified interface for:
-- **Axes A-G**: Galil DMC-4180 EtherCAT controller
-- **Axis H**: MyActuator RMD-X8 servo motor (via CAN-to-Ethernet)
+- **Axes A-D**: RSI RapidCode/EtherCAT via TIM Motion Service on iPC400
+- **Axis E**: Teknic ClearCore over UDP
+- **Axis H**: legacy MyActuator CAN-over-Ethernet (optional)
 
 ### Key Features
 - Tabbed interface for 8 independent servo controls
@@ -25,28 +29,33 @@ A touchscreen-friendly GUI application for controlling 8-axis motion systems wit
 ## System Requirements
 
 ### Hardware
-- **Galil DMC-4180** EtherCAT motion controller (for axes A-G)
-- **MyActuator RMD-X8** servo motor (for axis H)
-- **Waveshare CAN-to-Ethernet** converter (for MyActuator)
+- **iPC400 (TIM-PC)** running TIM Motion Service (A-D gateway)
+- **A-D EtherCAT motors** (e.g., X12/X8) owned by iPC400/RapidCode
+- **ClearCore + Teknic servo** for Axis E (UDP endpoint)
+- Optional: **Waveshare CAN-to-Ethernet** path for legacy Axis H
 - Windows PC with network connectivity
 
 ### Software
 - **Windows 10/11**
-- **Python 3.10** (required for RapidCode/RMP compatibility)
-- **NumPy 1.22.0** (required for RapidCode)
-- **Optional**: RapidCode/RMP 10.7.1+ (if using CommMode4)
+- **Python 3.10+**
+- **FreeSimpleGUI**
+- **NumPy**
+- Optional on iPC400 only: RapidCode/RMP for hardware-backed A-D service
 
 ### Python Packages
 - `FreeSimpleGUI` - GUI framework
-- `pyserial` - Serial communications
-- `numpy==1.22.0` - Required for RMP
-- `gclib` (optional) - Galil communications library
+- `pyserial` - utility serial support
+- `numpy` - math/data utilities
 
 ---
 
 ## TIM Motion Service (iPC400)
 
-The **TIM Motion Service** is the motion control gateway that runs on the iPC400 (TIM-PC) and owns all hardware I/O.
+The **TIM Motion Service** is the A-D motion gateway on iPC400.
+
+Current deployment note:
+- A-D are expected through TIM Motion Service on `192.168.1.151:503`.
+- Axis E is currently controlled directly by GUI via ClearCore UDP (`192.168.1.171:8888`).
 
 **See [tim_service/README.md](tim_service/README.md)** for:
 - Service architecture and startup
@@ -101,19 +110,11 @@ python -m pip install FreeSimpleGUI
 python -m pip install pyserial
 ```
 
-### 5. Install Galil gclib (Optional)
+### 5. Install RapidCode/RMP (iPC400 only, optional on GUI PC)
 
-Download and install gclib from [Galil](https://www.galil.com/downloads/software) if using CommMode1 (Galil Ethernet).
-
-### 6. Install RapidCode/RMP (Optional)
-
-If planning to use CommMode4 (RMP):
-1. Download RMP 10.7.1+ from RSI
-2. Install to `C:\RSI\10.7.1`
-3. Verify RapidCode imports:
-   ```powershell
-   python test_rmp_installation.py
-   ```
+If running real A-D hardware through TIM Motion Service on iPC400:
+1. Install RMP/RapidCode on iPC400
+2. Verify service-side RapidCode imports there
 
 ---
 
@@ -125,13 +126,24 @@ Edit `controller_config.ini` to configure your hardware:
 
 ```ini
 [Controller]
-type = DMC-4180
+type = RSI_PC400
 
 [CommMode1]
-address = 192.168.4.177          # Galil controller IP
+type = RSI
+ip_address = 192.168.1.151       # iPC400 TIM Motion Service (A-D)
+port = 503
+protocol = TCP
+
+[CommMode6]
+type = ClearCore
+ip_address = 192.168.1.171       # ClearCore axis E (current direct GUI path)
+port = 8888
+protocol = UDP
+disable_cmd = S1B1 DISABLE
+stop_cmd = S1B2 STOP
 
 [CommMode5]
-ip = 192.168.0.7                 # MyActuator CAN-to-Ethernet IP
+ip = 192.168.0.7                 # Legacy optional Axis H path
 port = 20001
 motor_id = 1
 
@@ -227,11 +239,9 @@ ControllerGUI/
 
 - **ControllerGUI.py**: Main application with tabbed interface
 - **communications.py**: Multi-mode controller abstraction
-  - CommMode1: Galil Ethernet (gclib)
-  - CommMode2: Galil Serial
-  - CommMode3: ClearCore UDP
-  - CommMode4: RapidCode/RMP
-  - CommMode5: MyActuator CAN-to-Ethernet
+  - CommMode1: RSI/TIM service TCP (A-D)
+  - CommMode6: ClearCore UDP (E)
+  - CommMode5: MyActuator CAN-to-Ethernet (H, optional)
 - **ControllerPolling.py**: Background thread for position updates
 - **numeric_keypad.py**: Custom numeric input dialog
 
@@ -239,20 +249,24 @@ ControllerGUI/
 
 ## Controller Communication Modes
 
-### CommMode1 - Galil Ethernet (gclib)
-- Uses Galil's gclib library
-- Direct Ethernet connection to DMC controller
-- Supports all Galil command set
+### CommMode1 - RSI/TIM TCP (A-D)
+- TCP client to TIM Motion Service on iPC400
+- Uses Galil-like ASCII command compatibility layer
+- Intended path for A-D EtherCAT control
+
+### CommMode6 - ClearCore UDP (E)
+- UDP command/response path to ClearCore
+- Active in current deployment for Axis E
+- Planned migration target: routed through TIM service
 
 ### CommMode5 - MyActuator CAN-to-Ethernet
 - TCP connection to Waveshare CAN-to-ETH converter
-- Translates Galil-like commands to MyActuator CAN protocol
-- Position control mode with speed limits
-- Encoder position feedback
+- Legacy/optional path for Axis H
 
 ### Routing Logic
-- Axes A-G → Galil controller (CommMode1)
-- Axis H → MyActuator motor (CommMode5)
+- Axes A-D → TIM Motion Service over CommMode1
+- Axis E → ClearCore over CommMode6 (current)
+- Axis H → MyActuator over CommMode5 (optional)
 
 ---
 
@@ -265,8 +279,9 @@ ControllerGUI/
 
 ### "Cannot connect to controller"
 - Verify controller IP addresses in `controller_config.ini`
-- Check network connectivity: `ping 192.168.4.177`
-- Ensure controller is powered on
+- Check A-D gateway connectivity: `ping 192.168.1.151`
+- Check Axis E endpoint connectivity: `ping 192.168.1.171`
+- Ensure iPC400 TIM service is running on port `503` for A-D
 
 ### Position not updating
 - Check "Show Poll Logs" to see if polling is active
@@ -278,11 +293,10 @@ ControllerGUI/
 - Check MyActuator motor ID matches config
 - Test connection: `python test_myactuator.py`
 
-### RMP/RapidCode import fails
-- Ensure Python 3.10 (not 3.12) is active
-- Install NumPy 1.22.0: `pip install numpy==1.22.0`
-- Verify RMP installed: `C:\RSI\10.7.1\`
-- Run test: `python test_rmp_installation.py`
+### A-D still shows No Link
+- Confirm TIM service is listening on iPC400: `netstat -ano | findstr :503`
+- Test from GUI PC: `Test-NetConnection 192.168.1.151 -Port 503`
+- Close RapidSetup before GUI A-D control tests (single hardware owner)
 
 ### "Access Denied" during RMP installation
 - Run installer as Administrator
@@ -347,7 +361,7 @@ Software limits enforced in GUI:
 
 ### v1.0.0 - Initial Release
 - Basic 8-axis Galil control
-- CommMode1 (Ethernet) and CommMode2 (Serial) support
+- Historical at launch: CommMode1 (Ethernet) and CommMode2 (Serial) support
 
 ---
 

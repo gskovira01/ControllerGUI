@@ -73,9 +73,9 @@ class ControllerComm:
     # [CHANGE 2026-03-22] NEW METHOD: Initialize RSI Software TCP connection
     def _init_rsi(self):
         """
-        Initialize RSI Software TCP connection for Axes A-D (Servos 1-4).
-        IP: 192.168.1.100:503
-        Protocol: TCP with ASCII command set
+        Initialize CommMode1 TCP connection used for A-D command/telemetry path.
+        Endpoint is driven by [CommMode1] values from controller_config.ini.
+        Protocol: TCP with ASCII command set.
         """
         ip = self.rsi_config.get('ip_address', '192.168.1.100')
         port = int(self.rsi_config.get('port', 503))
@@ -516,6 +516,11 @@ class ControllerComm:
             
             # MyActuator (Axis H)
             elif self.mode == 'CommMode5':
+                if not hasattr(self, '_myact_send_command'):
+                    if not getattr(self, '_missing_myactuator_handler_logged', False):
+                        logging.error('CommMode5 unavailable: _myact_send_command is not implemented on ControllerComm')
+                        self._missing_myactuator_handler_logged = True
+                    return False
                 return self._myact_send_command(cmd)
             
             else:

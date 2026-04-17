@@ -4,7 +4,11 @@
 
 **TIM** is a 5-axis motion control system designed for high-speed servo control of a multi-axis mechanical manipulator. The system separates operator control (GUI PC) from field motion control (iPC400 industrial PC), allowing for robust, deterministic motion execution without blocking on the operator input side.
 
-**Key Decision**: All hardware motion I/O is owned and managed by the iPC400. The operator GUI is a remote client that sends commands and receives telemetry only.
+**Target Architecture**: All hardware motion I/O is owned and managed by the iPC400. The operator GUI is a remote client that sends commands and receives telemetry only.
+
+**Current Deployment (2026-04-17)**: Hybrid mode is active.
+- Axes A-D are intended to run through iPC400 TIM Motion Service (TCP/503).
+- Axis E is currently controlled directly by GUI-to-ClearCore UDP.
 
 ---
 
@@ -33,7 +37,8 @@
 **Controller**: Teknic ClearCore processor  
 **Protocol**: UDP command/response interface to ClearCore board  
 **Coordination**: Non-real-time; fires independent of A-D motion  
-**Owned by**: iPC400 (all ClearCore I/O traffic originates from iPC400 only)
+**Current owner**: GUI PC direct UDP (CommMode6 in ControllerGUI)
+**Target owner**: iPC400 (all ClearCore I/O traffic originates from iPC400 only)
 
 ---
 
@@ -102,7 +107,7 @@
 ```
 
 ### Network Assumptions
-- **GUI PC ↔ iPC400**: 192.168.1.100, port 503 (TCP, low latency assumed but not required)
+- **GUI PC ↔ iPC400**: 192.168.1.151, port 503 (TCP, low latency assumed but not required)
 - **iPC400 ↔ ClearCore**: 192.168.1.171, port 8888 (UDP, static config)
 - **iPC400 ↔ EtherCAT slaves**: Deterministic EtherCAT over industrial Ethernet
 
@@ -120,16 +125,16 @@
 
 ### GUI PC Setup
 1. Python 3.10+ with FreeSimpleGUI and other dependencies.
-2. Network connectivity to iPC400 at 192.168.1.100:503.
-3. No RapidCode, no EtherCAT drivers, no direct hardware control.
-4. Operator can launch ControllerGUI.py anytime; motion service manages state independently.
+2. Network connectivity to iPC400 at 192.168.1.151:503.
+3. No RapidCode, no EtherCAT drivers.
+4. Current deployment includes direct GUI UDP control of Axis E (ClearCore).
 
 ### Startup Sequence
 1. **iPC400 boots**: TIM Motion Service starts, initializes EtherCAT stack, discovers slaves, waits for client.
-2. **Operator launches GUI**: Connects to iPC400 at 192.168.1.100:503.
-3. **GUI receives status**: Queries A-E axis enable state, position, faults.
-4. **Operator sends commands**: Enable, move, stop, etc. are routed by service to correct subsystem.
-5. **Service executes motion**: Returns status and position updates to GUI.
+2. **Operator launches GUI**: Connects to iPC400 at 192.168.1.151:503 for A-D and uses direct UDP to ClearCore for E.
+3. **GUI receives status**: Queries A-D via iPC400 service and E via ClearCore path.
+4. **Operator sends commands**: A-D routed through iPC400 service; E sent directly by GUI.
+5. **Service executes A-D motion**: Returns status/position updates for A-D.
 
 ---
 
@@ -137,7 +142,9 @@
 
 ### Galil-Like ASCII Protocol (Compatibility Layer)
 
-The GUI sends commands using Galil DMC-4180 compatible syntax. The iPC400 service translates these into RapidCode calls for A-D and ClearCore commands for E.
+The GUI sends commands using Galil DMC-4180 compatible syntax.
+- Current deployment: iPC400 service translates A-D to RapidCode, while Axis E uses direct ClearCore UDP from GUI.
+- Target architecture: iPC400 service translates both A-D and E.
 
 **Example Commands Sent by GUI:**
 ```
@@ -188,12 +195,12 @@ type = RSI_PC400
 [CommMode1]
 # iPC400 motion service (axes A-D: RapidCode/EtherCAT)
 type = RSI
-ip_address = 192.168.1.100
+ip_address = 192.168.1.151
 port = 503
 protocol = TCP
 
 [CommMode6]
-# ClearCore board (axis E: UDP, controlled via iPC400)
+# ClearCore board (axis E: UDP, currently controlled directly by GUI)
 type = ClearCore
 ip_address = 192.168.1.171
 port = 8888
@@ -260,7 +267,7 @@ description = Legacy CAN Motor (Disabled)
 
 [ControllerGUI.py](ControllerGUI.py) uses three comm channels:
 - `comm` (CommMode1): iPC400 motion service for A-D
-- `comm_e` (CommMode6): ClearCore board UDP (routed through iPC400 in final deployment)
+- `comm_e` (CommMode6): ClearCore board UDP (direct from GUI in current deployment)
 - `comm_h` (CommMode5): MyActuator CAN (disabled for TIM)
 
 **Future Simplification**: When iPC400 service owns ClearCore traffic, the GUI will consolidate to one TCP connection (CommMode1 only), and internal routing happens on the iPC400 side.
@@ -270,8 +277,9 @@ description = Legacy CAN Motor (Disabled)
 ## Safety & Control Ownership
 
 ### On iPC400 (TIM-PC)
-- **Sole motion authority**: Only the TIM Motion Service can command motion.
-- **Limit enforcement**: All software limits, enable interlocks, homing state.
+- **Current authority**: TIM Motion Service is authority for A-D.
+- **Target authority**: TIM Motion Service will be sole authority for A-E.
+- **Limit enforcement**: All software limits, enable interlocks, homing state (A-D currently through service).
 - **Fault handling**: Axis faults are cleared only by authorized service commands.
 - **Watchdog**: If GUI client disconnects, motion stops or enters safe state.
 - **Enable logic**: Servo enable/disable controlled by service logic, not GUI state.
@@ -279,7 +287,8 @@ description = Legacy CAN Motor (Disabled)
 ### On GUI PC
 - **Operator intent only**: Send commands, receive feedback.
 - **No real-time guarantees**: 500 ms polling cycle is informational, not control loop.
-- **No direct hardware**: All motion operations are requests, not direct control.
+- **Current exception**: Axis E commands are sent directly to ClearCore via UDP.
+- **Target mode**: No direct hardware once E is migrated behind iPC400 service.
 - **Best-effort reliability**: Network loss is handled by iPC400 watchdog, not GUI retry logic.
 
 ---
@@ -292,7 +301,9 @@ The GUI polls the iPC400 service at **2 Hz (500 ms cycle)** to update:
 - Current velocity
 - Fault flags (if any)
 
-Each poll sends a Galil-style query command and waits for a numeric response. The iPC400 service collects this data from RapidCode (A-D) and ClearCore (E) and returns it in a unified format.
+Each poll sends a Galil-style query command and waits for a numeric response.
+- Current deployment: A-D telemetry is via iPC400 service; E telemetry is via direct ClearCore path.
+- Target architecture: iPC400 service returns unified A-E telemetry.
 
 ---
 
@@ -382,7 +393,7 @@ GitHub (ControllerGUI repo):
 
 - RDP into iPC400 for service monitoring/debugging if needed
 - Or work directly at iPC400 console with hardware
-- GUI PC connects to iPC400 over network (192.168.1.100:503) for motion tests
+- GUI PC connects to iPC400 over network (192.168.1.151:503) for motion tests
 
 **Phase 3: Production Deployment**
 

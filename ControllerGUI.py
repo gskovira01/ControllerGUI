@@ -951,6 +951,11 @@ def build_servo_tab(servo_num):
         [sg.Text(f'Servo {servo_num}', font=POSITION_LABEL_FONT),
          sg.Text('●', key=f'S{servo_num}_status_light', font=('Courier New', 16), text_color='gray'),
          sg.Text('Disabled', key=f'S{servo_num}_status_text', font=GLOBAL_FONT, text_color='gray')],
+        # [CHANGE 2026-04-17 00:00:00 -04:00] Comm health indicator: shows link status for this axis's controller.
+        [sg.Text('Link:', font=GLOBAL_FONT),
+         sg.Text('●', key=f'S{servo_num}_comm_indicator', font=('Courier New', 14), text_color='gray',
+             tooltip='Controller communications health (green=OK, red=failed, gray=not configured)'),
+         sg.Text('—', key=f'S{servo_num}_comm_label', font=GLOBAL_FONT, text_color='gray', size=(18,1))],
         [sg.Text('Description:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(
              default_text=desc_default,
@@ -1367,7 +1372,7 @@ def adjust_axis_e_actual_by_delta(window, servo_num, delta_deg):
 window_closed = False
 import time
 # Import the polling thread from ControllerPolling
-from ControllerPolling import start_polling_thread
+from ControllerPolling import start_polling_thread, start_comm_health_thread
 
 def initialize_setpoints_from_controller(window, comm):
     """Query controller for current setpoints/status and seed GUI fields."""
@@ -1908,6 +1913,8 @@ def handle_servo_event(event, values):
                         cmd = cmd_func
                     LAST_MOTION_COMMAND[servo_num - 1] = 'jog'
                 case 'start':
+                    # [CHANGE 2026-04-17 00:00:00 -04:00] Added diagnostic print so start execution is visible in terminal log.
+                    print(f'[DEBUG] Start case entered for S{servo_num}, axis={axis_letter}, LAST_MOTION_COMMAND={LAST_MOTION_COMMAND[servo_num - 1]}')
                     # SAFETY: Block Start Motion if no valid position command was set
                     last_cmd = LAST_MOTION_COMMAND[servo_num - 1]
                     if last_cmd not in ('abs', 'rel'):
@@ -1966,6 +1973,7 @@ def handle_servo_event(event, values):
                             if not window_closed:
                                 window['DEBUG_LOG'].print(f'[WARN] Axis E start pre-load skipped: {start_param_err}')
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
+                    print(f'[DEBUG] Start: cmd={cmd!r} for S{servo_num} (axis {axis_letter})')
                 case 'enable' | 'disable' | 'stop':
                     cmd = COMMAND_MAP[map_key] if not callable(COMMAND_MAP[map_key]) else None
                     if action == 'stop':
@@ -2379,14 +2387,16 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
             print(f'[DEBUG] Jog release failed: {ex}')
     return
 
-# Start the background polling thread using ControllerPolling
-# This line starts the background polling thread for the GUI. Specifically:
-# start_polling_thread(window, comm, comm_h) is a function (imported from ControllerPolling.py) that launches a separate thread.
-# This thread periodically polls the controller (using the comm object for Galil axes A-G and comm_h for MyActuator axis H) for status updates (like position, torque, enable/disable state) for each servo.
-# It sends these updates back to the GUI window using thread-safe events (such as POSITION_POLL).
+# Start background polling threads using ControllerPolling.
+# - POSITION_POLL thread updates live motion/status fields per active axis routing.
+# - COMM_HEALTH thread updates per-axis link indicators (Comms OK / No Link).
+# Both threads post thread-safe events to the GUI event loop.
 
 # [CHANGE 2026-03-24 14:54:00 -04:00] Include comm_e so Axis E polling uses ClearCore path.
 polling_thread, polling_stop_event = start_polling_thread(window, comm, comm_e, comm_h)
+
+# [CHANGE 2026-04-17 00:00:00 -04:00] Start comm health thread: pings each controller every 5s and updates link indicators.
+comm_health_thread, comm_health_stop_event = start_comm_health_thread(window, comm, comm_e, comm_h, interval=5.0)
 
 # Main event loop (no periodic polling here)
 while True:
@@ -2764,6 +2774,27 @@ while True:
         except Exception:
             pass
         break
+
+    # [CHANGE 2026-04-17 00:00:00 -04:00] Comm health: update per-axis link indicator dots.
+    if event == 'COMM_HEALTH':
+        health_data = values.get('COMM_HEALTH', {})
+        if isinstance(health_data, dict) and not window_closed:
+            for servo_num, info in health_data.items():
+                ok = info.get('ok')
+                label = info.get('label', '')
+                ind_key   = f'S{servo_num}_comm_indicator'
+                label_key = f'S{servo_num}_comm_label'
+                if ind_key not in window.AllKeysDict:
+                    continue
+                if ok is True:
+                    color = '#00CC00'   # green
+                elif ok is False:
+                    color = '#FF3333'   # red
+                else:
+                    color = 'gray'      # not configured
+                window[ind_key].update('\u25cf', text_color=color)
+                window[label_key].update(label, text_color=color)
+        continue
 
     if event == 'POSITION_POLL':
         # Handle position update from background thread
