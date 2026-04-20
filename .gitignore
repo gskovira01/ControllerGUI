@@ -58,6 +58,7 @@ deprecated/
 
 # Excel and data files (keep originals only if needed)
 *.xlsx
+!motor_params/*.xlsx
 *.csv
 *.json.bak
 
