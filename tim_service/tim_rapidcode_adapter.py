@@ -141,6 +141,7 @@ class RapidCodeAdapter:
     def _ensure_pending_motion(self, axis_idx):
         """Create pending motion state for an axis if needed."""
         if axis_idx not in self._pending_motion:
+            jerk_default = float(self._get_axis_config(axis_idx).get('jerk', 30.0))
             self._pending_motion[axis_idx] = {
                 'mode': None,
                 'target': None,
@@ -148,7 +149,7 @@ class RapidCodeAdapter:
                 'speed': None,
                 'accel': None,
                 'decel': None,
-                'jerk': 30.0,
+                'jerk': jerk_default,
             }
         return self._pending_motion[axis_idx]
 
@@ -181,14 +182,16 @@ class RapidCodeAdapter:
                 'min_pos':            float(s.get('min', 0.0)),
                 'max_pos':            float(s.get('max', 360.0)),
                 'software_limit_deg': float(s.get('max', 360.0)),
+                'jerk':               float(s.get('jerk', 30.0)),
             }
             logger.info(
-                "Axis %s config from INI: scaling=%.4f gearbox=%.1f min=%s max=%s",
+                "Axis %s config from INI: scaling=%.4f gearbox=%.1f min=%s max=%s jerk=%s",
                 axis_letter,
                 self.axis_configs[axis_letter]['scaling'],
                 self.axis_configs[axis_letter]['gearbox'],
                 self.axis_configs[axis_letter]['min_pos'],
                 self.axis_configs[axis_letter]['max_pos'],
+                self.axis_configs[axis_letter]['jerk'],
             )
         logger.info("Axis A-D parameters loaded from %s", ini_path)
 
@@ -921,7 +924,7 @@ class RapidCodeAdapter:
                 speed = pending.get('speed')
                 accel = pending.get('accel')
                 decel = pending.get('decel')
-                jerk = pending.get('jerk') if pending.get('jerk') is not None else 50.0
+                jerk = pending.get('jerk') if pending.get('jerk') is not None else float(self._get_axis_config(axis_idx).get('jerk', 30.0))
                 try:
                     if None not in (speed, accel, decel):
                         logger.info(f"Axis {chr(65+axis_idx)} MoveSCurve args: target={target}, speed={speed}, accel={accel}, decel={decel}, jerk={jerk}")
@@ -939,7 +942,7 @@ class RapidCodeAdapter:
                 speed = pending.get('speed')
                 accel = pending.get('accel')
                 decel = pending.get('decel')
-                jerk = pending.get('jerk') if pending.get('jerk') is not None else 50.0
+                jerk = pending.get('jerk') if pending.get('jerk') is not None else float(self._get_axis_config(axis_idx).get('jerk', 30.0))
                 try:
                     if None not in (speed, accel, decel):
                         logger.info(f"Axis {chr(65+axis_idx)} MoveRelative args: distance={distance}, speed={speed}, accel={accel}, decel={decel}, jerk={jerk}")

@@ -1,38 +1,19 @@
-# =============================================================================
-# tim_config.yaml  —  TIM Motion SERVICE configuration (iPC400 only)
-# =============================================================================
-# This file controls service-level settings: network ports, hardware addresses,
-# safety timeouts, and development flags.
-#
-# AXIS PARAMETERS (scaling, limits, speed/accel) are written into this file
-# automatically by the GUI at startup from controller_config.ini (the master).
-# Do not edit the axes sections below manually — they will be overwritten.
-# To change axis parameters, edit controller_config.ini on the laptop.
-# =============================================================================
-
 service:
-  name: "TIM Motion Service"
-  version: "1.0"
-  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
-  # Seconds to wait before initializing RapidCode after service start.
-  # Required on reboot to allow INtime and EtherCAT to fully initialize
-  # before RapidCode connects. Increase if axes still fail after reboot.
+  name: TIM Motion Service
+  version: '1.0'
+  log_level: INFO
   startup_delay_sec: 20
-
 server:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 503
   max_clients: 5
   client_timeout_sec: 5
-
-# RapidCode connection settings (Axes A-D: EtherCAT)
-# Axis parameters below are auto-synced from controller_config.ini by the GUI.
 rapidcode:
-  ethercat_interface: "Ethernet 1"  # Adjust to your EtherCAT master interface
+  ethercat_interface: Ethernet 1
   phantom_mode: false
   axes:
     A:
-      name: "Primary Rotation X12"
+      name: Primary Rotation X12
       scaling: 364.0888
       gearbox: 1.0
       min_pos: 0
@@ -42,8 +23,9 @@ rapidcode:
       speed_max_dps: 360
       accel_min_dps2: 0
       accel_max_dps2: 720
+      jerk: 20
     B:
-      name: "Secondary Rotation X8"
+      name: Secondary Rotation X8
       scaling: 364.0888
       gearbox: 1.0
       min_pos: 0
@@ -53,8 +35,9 @@ rapidcode:
       speed_max_dps: 360
       accel_min_dps2: 0
       accel_max_dps2: 720
+      jerk: 20
     C:
-      name: "Tertiary Rotation X8"
+      name: Tertiary Rotation X8
       scaling: 364.0888
       gearbox: 1.0
       min_pos: 0
@@ -64,8 +47,9 @@ rapidcode:
       speed_max_dps: 360
       accel_min_dps2: 0
       accel_max_dps2: 720
+      jerk: 20
     D:
-      name: "Tertiary Lift X12"
+      name: Tertiary Lift X12
       scaling: 364.0888
       gearbox: 1.0
       min_pos: 0
@@ -75,17 +59,13 @@ rapidcode:
       speed_max_dps: 360
       accel_min_dps2: 0
       accel_max_dps2: 720
-
-# ClearCore connection settings (Axis E)
-# Axis E is controlled directly by the GUI via UDP — it does not go through
-# the TIM motion service. The axis_e section below is synced from INI for
-# reference and future routing, but is not used for live motion today.
+      jerk: 20
 clearcore:
-  ip_address: "192.168.1.171"
+  ip_address: 192.168.1.171
   port: 8888
   phantom_mode: false
   axis_e:
-    name: "Address Angle (ClearCore Servo 5)"
+    name: Address Angle (ClearCore Servo 5)
     min_pos: 0
     max_pos: 45
     software_limit_deg: 45
@@ -93,20 +73,16 @@ clearcore:
     speed_max_dps: 100
     accel_min_dps2: 0
     accel_max_dps2: 100
-
-# Safety settings
 safety:
   enabled: true
-  watchdog_timeout_sec: 10  # Disconnect safety timeout
-  motion_timeout_sec: 30    # Max motion duration before forced stop
+  watchdog_timeout_sec: 10
+  motion_timeout_sec: 30
   enable_fault_logging: true
   estop:
-    action: "STOP"  # STOP or DISABLE (stop motion vs disable servos)
+    action: STOP
     ramp_time_ms: 100
-
-# Development & testing
 development:
-  mock_rapidcode: false    # Use mock RapidCode (set false for real hardware)
-  mock_clearcore: false   # Use mock ClearCore
-  verbose_logging: false  # Extra debug output
-  log_all_commands: true  # Log every command/response
+  mock_rapidcode: false
+  mock_clearcore: false
+  verbose_logging: false
+  log_all_commands: true

@@ -297,6 +297,7 @@ def sync_ini_to_yaml(ini_path):
             'speed_max_dps':     float(s.get('speed_max', 360.0)),
             'accel_min_dps2':    float(s.get('accel_min', 0.0)),
             'accel_max_dps2':    float(s.get('accel_max', 720.0)),
+            'jerk':              float(s.get('jerk', 30.0)),
         }
 
     # Sync Axis E into clearcore.axis_e
