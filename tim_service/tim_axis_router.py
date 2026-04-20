@@ -33,6 +33,7 @@ class AxisRouter:
         self.config = config or {}
         self.phantom_mode = phantom_mode
         self.watchdog = watchdog
+        self._unsupported_axis_logged = set()
         
         # Initialize hardware adapters
         self.rapidcode = RapidCodeAdapter(
@@ -64,6 +65,12 @@ class AxisRouter:
         if not command:
             return "0"
         
+        # Handle broadcast commands (no axis)
+        # [CHANGE 2026-04-17 16:45:00 -04:00] Support MG _GN and other broadcast queries.
+        if command == 'MG _GN':
+            # Generation/ping query — return "1" to indicate alive
+            return "1"
+        
         # Extract axis letter (e.g., 'A' from "PA A=45" or "SH A")
         axis = self._extract_axis(command)
         
@@ -77,7 +84,9 @@ class AxisRouter:
         elif axis == 'E':
             return self.clearcore.handle_command(command, axis)
         else:
-            logger.warning(f"Axis {axis} not supported")
+            if axis not in self._unsupported_axis_logged:
+                logger.warning(f"Axis {axis} not supported")
+                self._unsupported_axis_logged.add(axis)
             return "0"
     
     def _extract_axis(self, command):
@@ -103,8 +112,9 @@ class AxisRouter:
         if token_match:
             return token_match.group(1)
 
-        # Compact commands with axis suffix: "SHE", "MOE", "DPA", "PRA=10"
-        compact_match = re.match(r'^\s*(?:SH|MO|ST|DP|TP|PA|PR|SP|AC|DC)([A-H])(?:\b|=)', command)
+        # Compact commands with axis suffix: "SHE", "MOE", "DPA", "PRA=10", "BGA"
+        # [CHANGE 2026-04-17 16:50:00 -04:00] Added BG (start motion) to compact pattern.
+        compact_match = re.match(r'^\s*(?:SH|MO|ST|DP|TP|PA|PR|SP|AC|DC|BG)([A-H])(?:\b|=)', command)
         if compact_match:
             return compact_match.group(1)
 

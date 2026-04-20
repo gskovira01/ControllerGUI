@@ -64,10 +64,48 @@ When RapidCode is installed and EtherCAT hardware is connected:
 python tim_motion_service.py --config tim_config.yaml
 ```
 
+Or use the preferred launcher scripts from the repo root:
+
+```powershell
+# Combined launcher (service + optional GUI)
+.\start_tim.ps1
+
+# Service only
+.\start_tim_service.ps1
+```
+
 ## Configuration
 
-Edit `tim_config.yaml` to set:
-- Axis names and limits
+### Axis parameters — `controller_config.ini` (repo root)
+
+Axis calibration, limits, and speed/accel settings are mastered in **`controller_config.ini`**
+at the repo root. The GUI automatically pushes these values into `tim_config.yaml` on the
+iPC400 at every startup via the network share — no manual file copying needed.
+
+The yaml axes sections are overwritten on each GUI start. Do not edit them manually.
+
+**Calibration constant for Axes A–D (MyActuator RMD EtherCAT motors):**
+
+```
+Motor:    RMD-X12 / RMD-X8, P20 variant (20:1 planetary gearbox)
+Encoder:  17-bit absolute (2^17 = 131,072 counts/revolution)
+Firmware: EtherCAT firmware handles the gearbox internally and reports
+          position as if the encoder sits on the output shaft.
+
+scaling = 131072 / 360 = 364.0888 counts per output degree
+gearbox = 1  (gearbox is invisible to RapidCode — do not change)
+```
+
+Verified empirically: 360° command in RapidSetup with UserUnitsSet=364.0888 = exactly 1 output revolution.
+
+**Axis E note:** Axis E (ClearCore) is controlled directly by the GUI via UDP —
+it does not route through this service. Its parameters are synced to the yaml for
+consistency but are not used for live motion today.
+
+### Service settings — `tim_config.yaml`
+
+Edit `tim_config.yaml` for service-level settings only:
+- EtherCAT interface name
 - ClearCore IP/port (192.168.1.171:8888)
 - Safety parameters (watchdog timeout, motion limits)
 - Development flags (phantom mode, verbose logging)
@@ -100,6 +138,58 @@ Numeric response (single value per line):
 0
 ```
 
+## Healthy Startup Log (what to expect)
+
+When the service starts cleanly against real hardware, you should see these events in order in `tim_motion_service.log`:
+
+```
+TIM Motion Service Starting
+TCP server listening on 0.0.0.0:503
+RapidCode network starting...
+EtherCAT network state: 260          ← must reach 260 (OPERATIONAL)
+OperationModeSet(CSP=8) axis A       ← CSP set after network is OPERATIONAL
+OperationModeSet(CSP=8) axis B
+OperationModeSet(CSP=8) axis C
+OperationModeSet(CSP=8) axis D
+ClearCore adapter ready (192.168.1.171:8888)
+Waiting for client connection...
+```
+
+If `OperationModeSet` appears **before** state 260, or the network stalls at state 256 (SAFE-OP), motion will appear to work but produce no output — restart the service and wait for state 260 before issuing any CSP commands.
+
+## Field-Proven Bring-Up Notes
+
+These notes capture what was required to get real hardware motion working (GUI laptop + iPC400 service, 2026-04-17).
+
+### 1) EtherCAT drive mode ordering matters
+- `OperationModeSet(CSP=8)` must be applied **after** `NetworkStart()` reaches OPERATIONAL (`state 260`).
+- Setting CSP while network is pre-op/safe-op can appear successful but produce no motion.
+
+### 2) Units must be explicit and consistent
+- For A/B with current gearing/scaling, service uses `UserUnitsSet(4500.0 counts/deg)`.
+- Adapter logic tracks user-units mode per axis and falls back to native units when unavailable.
+
+### 3) Axis enable/fault recovery must tolerate transient states
+- Real hardware may throw transient STOPPING/ClearFaults errors during enable.
+- Service enable flow retries and treats some pre-enable clear-fault failures as recoverable.
+
+### 4) Bench setup may require temporary limit policy changes
+- During bench bring-up (motors not installed), GUI limit-stop enforcement was temporarily disabled to avoid false trips.
+- Re-enable limits before installed operation.
+
+### 5) Fault-clear from GUI is available
+- GUI `Clear Faults` button routes to service and RapidCode fault-clear handling for A-D.
+
+### 6) Startup usability
+- GUI persists and restores per-servo `speed`, `accel`, and `decel` values across sessions.
+- `Reset Tuning` button restores all servos to `10/10/10`.
+
+### Quick verification checklist
+1. Start TIM service on iPC400 and confirm network reaches state `260`.
+2. Confirm logs show per-axis `OperationModeSet(CSP=8)` after network startup.
+3. Enable axis and issue a small absolute move (e.g., 10 deg).
+4. Verify position readback updates and no persistent fault state remains.
+
 ## Testing
 
 Run unit tests:
@@ -111,10 +201,40 @@ pytest tests/ -v --cov
 
 ## Development Workflow
 
-1. **Edit code on your laptop** in VS Code (d:\Python\ControllerGUI\tim_service)
-2. **Test locally** with phantom mode (--phantom flag)
+### Editing Code from Your Laptop
+
+The recommended workflow is to edit service files on your laptop and push to GitHub, then pull on the iPC400.
+
+1. **Edit code on your laptop** in VS Code (`d:\Python\ControllerGUI\tim_service`)
+2. **Test locally** with phantom mode (`--phantom` flag)
 3. **Push to GitHub** from your laptop
 4. **Pull on iPC400** and run with real hardware when ready
+
+### Network Share (Edit Live on iPC400)
+
+If you want to edit files directly on the iPC400 without a push/pull cycle, set up a Windows network share.
+
+**Network addresses:**
+- Engineering workstation (laptop): `192.168.1.150`
+- iPC400 (TIM-PC): `192.168.1.151`
+- ClearCore (Axis E): `192.168.1.171:8888`
+
+**On the iPC400:**
+1. Right-click `C:\TIM\ControllerGUI` → Properties → Sharing → Advanced Sharing
+2. Check "Share this folder", set share name (e.g., `TIM_Service`)
+3. Permissions → Grant Read/Write to your laptop user
+
+**On your laptop:**
+- Map a network drive to `\\192.168.1.151\TIM_Service` (File Explorer → This PC → Map network drive)
+- Or open directly in VS Code: File → Open Folder → type `\\192.168.1.151\TIM_Service`
+
+**Troubleshooting the share:**
+```powershell
+ping 192.168.1.151
+Test-NetConnection 192.168.1.151 -Port 503
+```
+- "Access Denied" — check share permissions on iPC400
+- "Network path not found" — use IP address instead of hostname
 
 ## Architecture
 
@@ -135,16 +255,34 @@ GUI PC (Operator)
 - **Software limits**: Position clamped to min/max per axis
 - **Fault logging**: All errors logged with axis/timestamp
 
-## Next Steps
+## Troubleshooting
 
-1. Install VS Code on iPC400 (if not already done)
-2. Clone the repo on iPC400 → `C:\TIM\`
-3. Edit `tim_config.yaml` with your network settings
-4. Update RapidCode adapter methods (currently TODO placeholders) with real RapidCode calls
-5. Test with real hardware via GUI client
+### "Cannot import RSI.RapidCode" / "Cannot import RapidCodePython"
+- Verify RSI RapidCode 10.7.1+ is installed on the iPC400 at `C:\RSI\10.7.1\`
+- Add the RSI path to VSCode `settings.json` on the iPC400:
+  ```json
+  {
+      "python.autoComplete.extraPaths": ["C:\\RSI\\10.7.1"],
+      "python.analysis.extraPaths":    ["C:\\RSI\\10.7.1"]
+  }
+  ```
+- Verify: `python -c "import RapidCodePython"`
+
+### Service won't connect / EtherCAT not starting
+- Close RapidSetup — only one process can own the EtherCAT network at a time
+- Confirm service is listening: `netstat -ano | findstr :503`
+- Check `tim_motion_service.log` for the error detail
+
+### Motion not working (axes enable but don't move)
+- Confirm `OperationModeSet(CSP=8)` was applied after network reached state `260` (see bring-up notes above)
+- Verify user-units are set (`UserUnitsSet(4500.0)` for A/B with current gearing)
+- Check `tim_motion_service.log` for fault or pre-enable errors
+
+### GUI shows "No Link" for A-D
+- Confirm TIM service is running on iPC400: `netstat -ano | findstr :503`
+- Test from GUI PC: `Test-NetConnection 192.168.1.151 -Port 503`
 
 ## See Also
 
 - [TIM_SYSTEM_DESIGN.md](../TIM_SYSTEM_DESIGN.md) — overall system architecture
 - [ControllerGUI README](../README.md) — GUI-side documentation
-- [RMP_QUICK_START.md](../RMP_QUICK_START.md) — RapidCode integration guide

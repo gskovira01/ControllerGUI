@@ -93,19 +93,31 @@ class TIMMotionServer:
         finally:
             self.shutdown()
     
+    def _recv_line(self, client_socket):
+        """Read bytes until \\r\\n, returning the stripped line. Returns None on disconnect."""
+        buf = b''
+        while True:
+            chunk = client_socket.recv(256)
+            if not chunk:
+                return None
+            buf += chunk
+            if b'\n' in buf:
+                line, _, _ = buf.partition(b'\n')
+                return line.decode('utf-8', errors='replace').strip()
+
     def _handle_client(self, client_socket, client_addr):
         """Handle a single client connection."""
         try:
             client_socket.settimeout(5.0)
-            
+
             while self.running:
                 try:
-                    # Receive command
-                    data = client_socket.recv(256)
-                    if not data:
+                    # Receive command — read until \r\n so Nagle-coalesced sends
+                    # never merge two commands into one dispatch.
+                    command = self._recv_line(client_socket)
+                    if command is None:
                         break
-                    
-                    command = data.decode('utf-8').strip()
+
                     logger.debug(f"[{client_addr}] Received: {command}")
                     
                     # Dispatch to axis router

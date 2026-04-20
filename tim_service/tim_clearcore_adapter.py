@@ -92,6 +92,18 @@ class ClearCoreAdapter:
                 return self._handle_query_status()
             elif 'MG _SP' in cmd_upper:
                 return self._handle_query_speed()
+            elif 'MG _TC' in cmd_upper:
+                # Query torque/current (return 0 for now; ClearCore doesn't expose motor current)
+                # [CHANGE 2026-04-17 16:45:00 -04:00] Return dummy torque.
+                return "0"
+            elif 'MG _AC' in cmd_upper or 'MG _DC' in cmd_upper:
+                # Query acceleration/deceleration (ClearCore doesn't expose these; return 0)
+                # [CHANGE 2026-04-17 16:45:00 -04:00] Return dummy accel/decel.
+                return "0"
+            elif cmd_upper.startswith('BG') or cmd_upper.startswith('BGE'):
+                # Start motion (for ClearCore, motion starts when QPAE/QPRE is sent)
+                # [CHANGE 2026-04-17 16:45:00 -04:00] BG is a no-op for ClearCore; motion is implicit.
+                return "1"
             elif cmd_upper.startswith('ST') or cmd_upper.startswith('STE'):
                 return self._handle_stop()
             else:

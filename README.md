@@ -3,6 +3,7 @@
 Touchscreen-friendly operator GUI for TIM with mixed routing:
 - Axes A-D: iPC400 TIM Motion Service (TCP/503)
 - Axis E: ClearCore UDP (direct from GUI in current deployment)
+- Axes F-G: future spare (reserved)
 - Axis H: legacy MyActuator path (optional / not primary for TIM)
 
 ## System Overview
@@ -10,6 +11,7 @@ Touchscreen-friendly operator GUI for TIM with mixed routing:
 **ControllerGUI** provides a unified interface for:
 - **Axes A-D**: RSI RapidCode/EtherCAT via TIM Motion Service on iPC400
 - **Axis E**: Teknic ClearCore over UDP
+- **Axes F-G**: future spare (reserved for expansion)
 - **Axis H**: legacy MyActuator CAN-over-Ethernet (optional)
 
 ### Key Features
@@ -26,6 +28,16 @@ Touchscreen-friendly operator GUI for TIM with mixed routing:
 
 ---
 
+## Significant Documents
+
+Use this index as the quick entry point for architecture, startup, and integration context:
+
+1. [README.md](README.md) - Main operator/developer entry point for this repo.
+2. [TIM_SYSTEM_DESIGN.md](TIM_SYSTEM_DESIGN.md) - System architecture, deployment model, and 10,000 ft software inventory.
+3. [tim_service/README.md](tim_service/README.md) - TIM service setup, operation, bring-up notes, and network share workflow.
+
+---
+
 ## System Requirements
 
 ### Hardware
@@ -37,15 +49,31 @@ Touchscreen-friendly operator GUI for TIM with mixed routing:
 
 ### Software
 - **Windows 10/11**
-- **Python 3.10+**
+- **Python 3.11+** (3.10 supported as fallback)
 - **FreeSimpleGUI**
 - **NumPy**
 - Optional on iPC400 only: RapidCode/RMP for hardware-backed A-D service
 
 ### Python Packages
+
+#### GUI Runtime (engineering workstation)
 - `FreeSimpleGUI` - GUI framework
 - `pyserial` - utility serial support
 - `numpy` - math/data utilities
+
+#### TIM Service Runtime (iPC400)
+- `pyyaml` - TIM service configuration parsing (`tim_config.yaml`)
+- `numpy` (`>=1.22.0,<2`) - RapidCode-compatible NumPy ABI for service/hardware integration
+- `python-daemon` - service wrapper helpers
+- `pywin32` - Windows-specific service/runtime integration
+
+#### Optional Features
+- `openpyxl` - Excel DataPipe/PVT file loading in GUI workflows
+- RSI RapidCode Python modules (`RapidCodePython` / `RSI.RapidCode`) - installed via RSI installer, not pip
+
+#### Test/Development
+- `pytest` - unit test runner
+- `pytest-cov` - test coverage reporting
 
 ---
 
@@ -73,56 +101,105 @@ python tim_motion_service.py --phantom --debug
 
 ## Installation & Setup
 
-### 1. Install Python 3.10
+### 1. Install Python 3.11
 
-Download and install Python 3.10 from [python.org](https://www.python.org/downloads/)
+Download and install Python 3.11 from [python.org](https://www.python.org/downloads/)
 
 Verify installation:
 ```powershell
-py -3.10 --version
+py -3.11 --version
 ```
 
-### 2. Create Virtual Environment
+### 2. Engineering Workstation (GUI) Setup
 
-Navigate to the project directory and create a Python 3.10 virtual environment:
+Create and activate GUI virtual environment:
+
+```powershell
+cd D:\Python\ControllerGUI
+py -3.11 -m venv venv_rmp311
+.\venv_rmp311\Scripts\Activate.ps1
+```
+
+Fallback (if 3.11 is unavailable):
 
 ```powershell
 cd D:\Python\ControllerGUI
 py -3.10 -m venv venv_py310
-```
-
-### 3. Activate Virtual Environment
-
-```powershell
 .\venv_py310\Scripts\Activate.ps1
 ```
-python ControllerGUI.py
 
-
-You should see `(venv_py310)` in your terminal prompt.
-
-### 4. Install Dependencies
+Install GUI dependencies:
 
 ```powershell
 python -m pip install --upgrade pip
 python -m pip install numpy==1.22.0
 python -m pip install FreeSimpleGUI
 python -m pip install pyserial
+python -m pip install openpyxl
 ```
 
-### 5. Install RapidCode/RMP (iPC400 only, optional on GUI PC)
+Run GUI:
 
-If running real A-D hardware through TIM Motion Service on iPC400:
-1. Install RMP/RapidCode on iPC400
-2. Verify service-side RapidCode imports there
+```powershell
+python ControllerGUI.py
+```
+
+### 3. iPC400 TIM Service Setup
+
+Create and activate service virtual environment:
+
+```powershell
+cd C:\TIM\ControllerGUI\tim_service
+py -3.11 -m venv venv
+.\venv\Scripts\Activate.ps1
+```
+
+Install service dependencies:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Install RapidCode/RMP on iPC400 for real A-D hardware operation:
+1. Install RSI RapidCode/RMP on iPC400.
+2. Verify service-side imports (`RapidCodePython` / `RSI.RapidCode`) resolve.
+
+### 4. Optional Test/Dev Dependencies
+
+If you want to run tests locally:
+
+```powershell
+python -m pip install pytest pytest-cov
+```
 
 ---
 
 ## Configuration
 
-### controller_config.ini
+### controller_config.ini — single source of truth
 
-Edit `controller_config.ini` to configure your hardware:
+`controller_config.ini` is the master configuration file for all axis parameters.
+Edit axis parameters here — the GUI pushes them automatically to the TIM service
+yaml on iPC400 at startup via the network share. No manual file copying required.
+
+**How sync works:**
+1. GUI starts on laptop → reads `controller_config.ini`
+2. GUI writes axis values into `tim_config.yaml` on iPC400 (via network share path set in `[CommMode1] tim_yaml_path`)
+3. TIM service reads its yaml as normal — always up to date
+
+**Axis E note:** Axis E (ClearCore) is controlled directly by the GUI via UDP and does
+not go through the TIM service. Its INI parameters are still synced to the yaml for
+consistency but are not used for live motion routing today.
+
+**Calibration constant for Axes A–D (MyActuator RMD EtherCAT motors):**
+```
+scaling = 364.0888   (= 131072 / 360 = 2^17 counts per output degree)
+gearbox = 1          (EtherCAT firmware handles the 20:1 gearbox internally)
+```
+The motor has a 17-bit absolute encoder (131,072 counts/rev). The EtherCAT firmware
+applies the 20:1 gearbox ratio internally and reports position at the output shaft.
+Verified empirically: 360° command in RapidSetup = exactly 1 output revolution.
 
 ```ini
 [Controller]
@@ -190,7 +267,7 @@ decel_max = 500
 
 ### 1. Activate Virtual Environment
 ```powershell
-.\venv_py310\Scripts\Activate.ps1
+.\venv_rmp311\Scripts\Activate.ps1
 ```
 
 ### 2. Launch GUI
@@ -222,18 +299,19 @@ python ControllerGUI.py
 
 ## File Structure
 
-```
-ControllerGUI/
-├── ControllerGUI.py           # Main GUI application
-├── ControllerPolling.py       # Background position polling thread
-├── communications.py          # Unified controller communications
-├── numeric_keypad.py          # Touchscreen numeric input
-├── controller_config.ini      # Hardware configuration
-├── test_rmp_installation.py   # RMP installation validator
-├── test_myactuator.py         # MyActuator test utility
-├── venv_py310/                # Python 3.10 virtual environment
-└── README.md                  # This file
-```
+### Where to Find Files
+
+- **ControllerGUI.py** — The main program you run for the GUI.
+- **ControllerPolling.py** — Handles checking controller status in the background.
+- **communications.py** — Code for talking to hardware (serial/network).
+- **numeric_keypad.py** — The pop-up keypad for entering numbers in the GUI.
+- **controller_config.ini** — The main settings file for the GUI.
+- **sequence_state.json** — Remembers your last speed/accel/decel settings.
+- **archive/** — Old backups and extra tools. Look here for previous versions and non-core scripts.
+- **tim_service/** — All the code that runs on the iPC400 (motion service, adapters, safety, etc).
+- **venv_rmp311/** — Python 3.11 environment (use this for normal work).
+- **venv_py310/** — Python 3.10 environment (fallback only).
+- **wheels/** — Local copies of Python packages for offline install.
 
 ### Key Modules
 
@@ -274,7 +352,7 @@ ControllerGUI/
 
 ### GUI won't start
 - Verify virtual environment is activated: `(venv_py310)` in prompt
-- Check Python version: `python --version` should show 3.10.x
+- Check Python version: `python --version` should show 3.11.x (or 3.10.x fallback)
 - Reinstall packages: `pip install -r requirements.txt`
 
 ### "Cannot connect to controller"

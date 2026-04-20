@@ -186,79 +186,50 @@ This change will be transparent to operators once finalized.
 
 ## Axis Mapping in Code
 
+### Encoder & Scaling Reference (Axes A–D)
+
+**Motor**: MyActuator RMD-X12 / RMD-X8, P20 variant (20:1 planetary gearbox), EtherCAT interface
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Encoder resolution | 17-bit (131,072 counts/rev) | Absolute encoder on motor shaft |
+| Gearbox ratio | 20:1 | Handled **internally** by EtherCAT firmware |
+| RapidCode view | 131,072 counts/output rev | Firmware reports output-shaft position |
+| `scaling` constant | **364.0888** counts/degree | 131072 ÷ 360 |
+| `gearbox` in config | **1** | Do NOT set to 20 — firmware already applies it |
+| UserUnitsSet value | 364.0888 | Set at service init; `ActualPositionGet()` returns **degrees** |
+
+**Key identity**: `scaling × gearbox = 364.0888 × 1.0 = 364.0888 counts/degree`
+
+Verification: commanding 360° in RapidSetup produces exactly one output shaft revolution.
+
 ### Current Configuration (controller_config.ini)
 
-```ini
-[Controller]
-type = RSI_PC400
+`controller_config.ini` is the **single source of truth** for axis parameters — read by both the GUI and the TIM service at startup. Do not duplicate axis values in `tim_config.yaml`.
 
+```ini
 [CommMode1]
-# iPC400 motion service (axes A-D: RapidCode/EtherCAT)
-type = RSI
-ip_address = 192.168.1.151
+ip_address = 192.168.1.151   # iPC400 TIM Motion Service
 port = 503
 protocol = TCP
 
 [CommMode6]
-# ClearCore board (axis E: UDP, currently controlled directly by GUI)
-type = ClearCore
-ip_address = 192.168.1.171
+ip_address = 192.168.1.171   # ClearCore board (Axis E)
 port = 8888
 protocol = UDP
 
-[AXIS_A]
-description = Primary Rotation
-min = 0
-max = 180
-pulses = 108000
-degrees = 360
-scaling = 300.0
-gearbox = 15
+# Axes A–D: identical scaling constants
+[AXIS_A]  # Primary Rotation
+scaling = 364.0888    # 131072 counts/rev ÷ 360 degrees
+gearbox = 1           # EtherCAT firmware hides the 20:1 gearbox
+min = 0  /  max = 180
 
-[AXIS_B]
-description = Secondary Rotation
-min = 0
-max = 180
-pulses = 108000
-degrees = 360
-scaling = 300.0
-gearbox = 15
+[AXIS_B]  # Secondary Rotation   (same scaling/gearbox as A)
+[AXIS_C]  # Tertiary Rotation    (same scaling/gearbox as A)
+[AXIS_D]  # Quaternary           (same scaling/gearbox as A)
 
-[AXIS_C]
-description = Tertiary Rotation
-min = 0
-max = 160
-pulses = 108000
-degrees = 360
-scaling = 300.0
-gearbox = 15
-
-[AXIS_D]
-description = Quaternary (Tertiary Lift)
-min = 0
-max = 160
-pulses = 108000
-degrees = 360
-scaling = 300.0
-gearbox = 15
-
-[AXIS_E]
-description = Address Angle (ClearCore Servo 5)
-min = 0
-max = 45
-pulses = 7200
-degrees = 360
-scaling = 1870
-gearbox = 1
-
-[AXIS_F]
-description = (Unused)
-
-[AXIS_G]
-description = (Unused)
-
-[AXIS_H]
-description = Legacy CAN Motor (Disabled)
+[AXIS_E]  # Address Angle — Teknic ClearCore servo
+scaling = 1870   gearbox = 1   min = 0   max = 45
 ```
 
 ---
@@ -445,6 +416,109 @@ GUI PC (d:\Python\ControllerGUI):
 
 ---
 
+## 10,000 ft Software Inventory (Active Runtime)
+
+This section maps the active first-party software used in the current deployment. It intentionally excludes virtual environments, wheel caches, and historical archive backups.
+
+### Engineering Workstation (Laptop)
+
+| File | What It Does | Key Routines |
+|------|--------------|--------------|
+| `ControllerGUI.py` | Main operator GUI for servo tabs, setpoint entry, motion commands, fault controls, and on-screen telemetry. | `handle_servo_event`, `handle_all_run_sequence`, `apply_startup_motion_defaults`, `reset_motion_defaults`, `prepare_pvt_payload`, `send_pvt_payload`, `prepare_datapipe_segments`, `send_datapipe_contour` |
+| `ControllerPolling.py` | Background polling and communications health monitoring for UI updates. | `polling_thread_func`, `start_polling_thread`, `comm_health_thread_func`, `start_comm_health_thread` |
+| `communications.py` | Unified transport layer used by GUI for RSI/TIM TCP, ClearCore UDP, and optional legacy paths. | `_init_rsi`, `_init_clearcore`, `_clearcore_translate`, `_init_myactuator`, `send_command`, `close` |
+| `numeric_keypad.py` | Touch-friendly numeric keypad popup for value entry in GUI fields. | `NumericKeypad` helpers |
+| `InitializeController.py` | INI-driven comm-object construction and query helper utility. | `_read_ini`, `_create_comm`, `query_all_axes` |
+| `rmp_controller.py` | RapidCode wrapper utility module used for local diagnostics and wrapper-style testing flows. | `RMPController` methods |
+| `RapidCodeHelpers.py` | Misc. RapidCode helper routines and reference utilities. | RapidCode helper functions |
+| `ControllerGUI_github.py` | Alternate/sanitized GUI variant retained for repository use. | GUI event and layout routines |
+
+### TIM iPC400 Runtime (Service Side)
+
+| File | What It Does | Key Routines |
+|------|--------------|--------------|
+| `tim_service/tim_motion_service.py` | Service entrypoint; loads config, starts motion server, builds adapters/router/watchdog. | `load_config`, `main`, `on_stop`, `tick` |
+| `tim_service/tim_motion_server.py` | TCP server on port 503 that receives Galil-like ASCII commands from GUI clients. | `run`, `_handle_client`, `shutdown` |
+| `tim_service/tim_axis_router.py` | Axis-based command routing between RapidCode and ClearCore adapters. | `dispatch`, `_extract_axis`, `shutdown` |
+| `tim_service/tim_rapidcode_adapter.py` | A-D adapter that translates command stream to RapidCode/EtherCAT API calls (enable, move, query, safety state handling). | `_init_rapidcode`, `handle_command`, `_handle_enable`, `_handle_start_motion`, `_handle_absolute_move`, `_handle_set_speed`, `_handle_query_position`, `shutdown` |
+| `tim_service/tim_clearcore_adapter.py` | Axis E UDP adapter for ClearCore command/response translation. | `_init_clearcore`, `handle_command`, `_handle_absolute_move`, `_handle_set_speed`, `_handle_query_position`, `_handle_stop`, `shutdown` |
+| `tim_service/tim_safety_watchdog.py` | Service-side safety monitor for activity timeout and fault state management. | `start`, `_watchdog_loop`, `_handle_timeout`, `update_activity`, `set_axis_enabled`, `set_axis_position`, `add_fault`, `shutdown` |
+| `tim_service/rsi_network_probe.py` | RapidCode network diagnostics utility for bring-up and troubleshooting. | Probe and diagnostics routines |
+
+### Shared Configuration and Persistent State
+
+| File | Purpose |
+|------|---------|
+| `controller_config.ini` | GUI-side comm endpoints, axis scaling, limits, and descriptions. |
+| `tim_service/tim_config.yaml` | Service-side host/port, adapter, and safety configuration. |
+| `motion_defaults.json` | Persisted startup defaults for speed/accel/decel. |
+| `sequence_state.json` | Persisted ALL-tab sequence values and repeat flags. |
+| `controller_comm.log` / `tim_motion_service.log` | Runtime logs for diagnostics and fault/event traceability. |
+
+### Startup and Launch Scripts
+
+| File | Purpose |
+|------|---------|
+| `run_gui.ps1` | Launches GUI on workstation using local Python environment. |
+| `start_tim.ps1` | Unified launcher for TIM service and/or GUI modes. |
+| `start_tim_service.ps1` | Service-only wrapper entrypoint (delegates to `start_tim.ps1`). |
+
+### Tests and Validation Utilities
+
+| File | Purpose |
+|------|---------|
+| `test_comm.py` | Communications validation script. |
+| `test_rmp_installation.py` | RapidCode installation and phantom-mode sanity test. |
+| `tim_service/tests/test_axis_router.py` | Unit tests for axis routing behavior. |
+| `tim_service/tests/test_mock_rapidcode.py` | Mock RapidCode fixtures for service testing without hardware. |
+| `tim_service/examples/client_test.py` | Example TCP client for manual service command testing. |
+
+### Ownership Summary
+
+- **Laptop owns**: Operator interface, command intent generation, display/persistence UX.
+- **iPC400 owns**: Motion execution authority for EtherCAT axes and service-level safety/watchdog logic.
+- **Current hybrid note**: Axis E still has direct GUI UDP control path in active deployment; target architecture remains iPC400 ownership of all hardware I/O.
+
+---
+
+## Resolved Bugs & Key Debugging Lessons (2026-04-19)
+
+### Bug 1 — Actuals always showed 0 (TCP buffer accumulation)
+**Root cause**: The TIM service sends a response for *every* command (queries AND action commands). The old `CommMode1` `send_command` only called `recv()` for query commands. Responses to action commands (`SH`, `SP`, `AC`, `PA`, `BG` → each returning `"1"`) piled up in the TCP buffer. The polling thread read those stale `"1"` responses as position values → `1 ÷ 364.0888 ≈ 0.003°` → displayed as 0.
+
+**Fix** (`communications.py`): `send_command` for CommMode1 now always calls `recv()` after every `sendall()`, inside `self._lock`. The lock is also held across the entire send+recv pair so the polling thread and GUI event loop cannot interleave on the same socket.
+
+### Bug 2 — Polling thread crashed silently on first iteration (NameError)
+**Root cause**: `torque_cmd`, `status_cmd`, `speed_cmd`, `torque_resp`, `status_resp`, `speed_resp` were used in the polling loop body but never initialized at the top of the `while` loop. `NameError` was raised on first iteration, caught silently by the outer `except Exception: pass`, and the thread exited permanently.
+
+**Fix** (`ControllerPolling.py`): All eight command strings and response variables are initialized at the top of the `while` loop.
+
+### Bug 3 — TCP connection dropped every 1–5 minutes (WinError 10054)
+**Root cause**: Nagle's algorithm occasionally batched two client commands into one TCP segment. The old server `recv(256)` read both as one string, dispatched the combined string as a single command, and sent one response — leaving the protocol one response short and eventually misaligning the stream until the socket was reset.
+
+**Fix** (`tim_motion_server.py`): `_handle_client` now uses a `_recv_line()` helper that accumulates bytes until `\n`, ensuring exactly one command is dispatched per server cycle regardless of TCP segmentation.
+
+**Also added** (`communications.py`): `_reconnect_rsi()` auto-reconnect — if `sendall()` or `recv()` raises `OSError`, the broken socket is closed and one reconnect is attempted before returning `False`.
+
+### Bug 4 — Actual position "drifted back to zero" after motor stopped
+**Root cause**: The GUI's `_consecutive_zero_actuals` counter forced the display to `'0'` after 3 consecutive zero-valued position responses. RapidCode/EtherCAT briefly returns 0 during the state transition at the end of a `MoveSCurve` profile (MOVING → DONE). Three polling cycles at 500 ms = 1.5 s was enough to trip the counter.
+
+**Fix** (`ControllerGUI.py`): The zero-suppression logic now only forces `'0'` when:
+- the commanded setpoint **is** zero (`last_setpoint_zero`), OR
+- the motor has **never** been at a non-zero position (`has_seen_nonzero = False`)
+
+Otherwise, the last valid non-zero reading is held on screen. The `consecutive_zero` counter no longer overrides the display.
+
+### Bug 5 — BG command auto-enabled a disabled axis
+**Root cause**: `_handle_start_motion` in `tim_rapidcode_adapter.py` contained deliberate auto-enable logic: if the axis was disabled when `BG` arrived, it silently called `_handle_enable()` before executing the move.
+
+**Fix**: BG on a disabled axis now returns `"0"` and logs a warning. The operator must explicitly enable the axis before issuing motion commands.
+
+### EtherCAT startup latency (~30 s)
+After the GUI connects to the TIM service, `ActualPositionGet()` returns 0 for approximately 30 seconds while the EtherCAT network cycles through INIT → PRE-OP → SAFE-OP → OPERATIONAL states. This is expected hardware behavior — the GUI now handles it cleanly by showing `'0'` until the first real encoder reading arrives.
+
+---
+
 ## Future Enhancements
 
 ### Phase 2: Protocol Simplification
@@ -488,3 +562,5 @@ Extend GUI to capture and display RapidCode fault codes and ClearCore diagnostic
 | Date | Version | Notes |
 |------|---------|-------|
 | 2026-04-11 | 1.0 | Initial system design specification |
+| 2026-04-18 | 1.1 | Added 10,000 ft software inventory: active files, key routines, startup scripts, tests, and ownership map |
+| 2026-04-19 | 1.2 | Added encoder/scaling reference table; updated axis config section with correct 364.0888 constants; added Resolved Bugs section documenting TCP buffer, NameError, connection drop, zero-drift, and auto-enable fixes |

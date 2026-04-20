@@ -95,29 +95,26 @@ def polling_thread_func(window, comm, comm_e, comm_h, stop_event):
             except queue.Empty:
                 pass
         
-        # --- Position ---
-        pos_cmd = f'MG _RP{axis_letter}'
-        pos_resp = None
-        raw_resp_str = None
-        # --- Torque (example: MG _TC{axis_letter}) ---
-        torque_cmd = f'MG _TC{axis_letter}' if not is_clearcore_axis else None
+        # --- Commands and response variables for this poll cycle ---
+        pos_cmd    = f'MG _RP{axis_letter}'
+        torque_cmd = f'MG _TC{axis_letter}'
+        status_cmd = f'MG _MO{axis_letter}'
+        speed_cmd  = f'MG _SP{axis_letter}'
+        pos_resp    = None
         torque_resp = None
-        # --- Enable/Disable Status (example: MG _MO{axis_letter}) ---
-        status_cmd = f'MG _MO{axis_letter}' if not is_clearcore_axis else None
         status_resp = None
-        # --- Actual speed (example: MG _SPE{axis_letter}) ---
-        speed_cmd = f'MG _SPE{axis_letter}' if not is_clearcore_axis else None
-        speed_resp = None
-        # 3. Issue the requests
+        speed_resp  = None
+        raw_resp_str = None
         if active_comm:
             try:
                 # Check if this is MyActuator (CommMode5) - it returns responses directly, no retries needed
                 is_myactuator = (active_comm.mode == 'CommMode5') if hasattr(active_comm, 'mode') else False
-                
+
                 # Position
                 resp_direct = active_comm.send_command(pos_cmd)
                 if isinstance(resp_direct, str):
                     resp_str = resp_direct.strip()
+
                     raw_resp_str = resp_str
                     pos_resp = _extract_numeric_response(resp_str)
                     if pos_resp is None and axis_letter == 'E':
@@ -212,6 +209,7 @@ def polling_thread_func(window, comm, comm_e, comm_h, stop_event):
                 pass
         # 4. Send result to GUI
         if pos_resp is not None or torque_resp is not None or status_resp is not None or speed_resp is not None:
+
             window.write_event_value(
                 'POSITION_POLL',
                 {

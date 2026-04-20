@@ -79,19 +79,31 @@ class ControllerComm:
         """
         ip = self.rsi_config.get('ip_address', '192.168.1.100')
         port = int(self.rsi_config.get('port', 503))
-        
+
         try:
             self.rsi_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.rsi_sock.settimeout(2.0)
             self.rsi_sock.connect((ip, port))
-            
-            print(f"[DEBUG] RSI Software connected: {ip}:{port}")
-            logging.info(f"RSI Software initialized: {ip}:{port}")
+            logging.info(f"RSI Software connected: {ip}:{port}")
         except Exception as e:
             msg = f"[ERROR] Communications Error (RSI): {e}"
             print(msg)
             logging.error(msg)
             self.rsi_sock = None
+
+    def _reconnect_rsi(self):
+        """Drop the broken socket and attempt one reconnect. Returns True on success."""
+        try:
+            if self.rsi_sock is not None:
+                try:
+                    self.rsi_sock.close()
+                except Exception:
+                    pass
+                self.rsi_sock = None
+            self._init_rsi()
+            return self.rsi_sock is not None
+        except Exception:
+            return False
 
     def _init_clearcore(self):
         """
@@ -421,20 +433,32 @@ class ControllerComm:
             if self.mode == 'CommMode1':
                 if not hasattr(self, 'rsi_sock') or self.rsi_sock is None:
                     return False
-                
-                # RSI uses simple ASCII commands terminated with \r\n
-                rsi_cmd = cmd.strip() + '\r\n'
-                self.rsi_sock.sendall(rsi_cmd.encode())
-                
-                # For query commands, wait for response
+
+                # Lock ensures each send+recv pair is atomic across threads (polling
+                # thread and GUI event loop share the same socket).  The TIM service
+                # always sends a response for every command, so we always recv to
+                # prevent stale responses from accumulating in the TCP buffer.
+                for _attempt in range(2):
+                    with self._lock:
+                        try:
+                            rsi_cmd = cmd.strip() + '\r\n'
+                            self.rsi_sock.sendall(rsi_cmd.encode())
+                            try:
+                                response = self.rsi_sock.recv(1024).decode().strip()
+                                logging.info(f'RECV (RSI): {response}')
+                            except socket.timeout:
+                                response = "0"
+                            break  # success — exit retry loop
+                        except OSError as _sock_err:
+                            logging.warning(f'RSI socket error ({_sock_err}), reconnecting…')
+                            if _attempt == 0 and self._reconnect_rsi():
+                                continue  # retry once on fresh socket
+                            return False
+                else:
+                    return False
+
                 if cmd_upper.startswith(query_prefixes):
-                    try:
-                        response = self.rsi_sock.recv(1024).decode().strip()
-                        logging.info(f'RECV (RSI): {response}')
-                        return response
-                    except socket.timeout:
-                        return "0"
-                
+                    return response
                 return True
             
             # ClearCore Board 1 (Axis E)

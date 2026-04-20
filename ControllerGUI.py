@@ -193,6 +193,7 @@ SEQ_STOP_EVENT = None
 SEQ_RUNNING = False
 SEQUENCE_STATE_FILE = os.path.join(os.path.dirname(__file__), 'sequence_state.json')
 MOTION_DEFAULTS_FILE = os.path.join(os.path.dirname(__file__), 'motion_defaults.json')
+STARTUP_SPEED_DEFAULT = 10.0
 STARTUP_ACCEL_DECEL_DEFAULT = 10.0
 
 # Safety: Track last command type per servo to prevent unsafe Start Motion
@@ -203,6 +204,12 @@ JOG_STOP_EVENTS = [None] * 8
 
 # Absolute safety limit: never allow more than 360 degrees rotation from zero
 ABSOLUTE_SAFETY_LIMIT_DEG = 360.0
+# Require consecutive out-of-limit reads before safety stop to avoid single-sample spikes.
+LIMIT_TRIP_CONFIRM_SAMPLES = 3
+# Tolerance added to soft limits so readback jitter near a boundary (e.g. 0°) doesn't trigger a false stop.
+LIMIT_SOFT_TOLERANCE_DEG = 2.0
+# Bench-test override: disable all runtime limit-stop enforcement/popups temporarily.
+SAFETY_LIMIT_STOPS_ENABLED = False
 # [CHANGE 2026-03-24 12:42:00 -04:00] Axis E conservative relative-step safety cap.
 AXIS_E_MAX_RELATIVE_STEP_DEG = 15.0
 # [CHANGE 2026-03-24 13:24:00 -04:00] Axis E jog safety: one-shot jog step cap per click.
@@ -235,6 +242,90 @@ DEFAULT_SERVO_DESCRIPTIONS = {
 AXIS_UNITS = {}
 axis_ini = configparser.ConfigParser()
 axis_ini.read(INI_PATH)
+
+
+def sync_ini_to_yaml(ini_path):
+    """Push axis parameters from controller_config.ini into tim_config.yaml on iPC400.
+
+    Called at GUI startup so the TIM service always reflects the INI master values.
+    The yaml path is read from [CommMode1] tim_yaml_path in the INI.
+    Fails silently with a warning if the yaml is unreachable (e.g. iPC400 offline).
+    """
+    try:
+        import yaml
+    except ImportError:
+        print('[WARNING] pyyaml not installed — skipping INI→yaml sync. Run: pip install pyyaml')
+        return
+
+    ini = configparser.ConfigParser()
+    ini.read(ini_path)
+
+    yaml_path = ini.get('CommMode1', 'tim_yaml_path', fallback=None)
+    if not yaml_path:
+        local_yaml = os.path.join(os.path.dirname(ini_path), 'tim_service', 'tim_config.yaml')
+        yaml_path = local_yaml
+
+    try:
+        with open(yaml_path, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        print(f'[WARNING] tim_config.yaml not found at {yaml_path} — skipping sync')
+        return
+    except Exception as e:
+        print(f'[WARNING] Could not read tim_config.yaml at {yaml_path}: {e}')
+        return
+
+    # Sync Axes A-D into rapidcode.axes
+    if 'rapidcode' not in cfg:
+        cfg['rapidcode'] = {}
+    if 'axes' not in cfg['rapidcode']:
+        cfg['rapidcode']['axes'] = {}
+
+    for letter in ('A', 'B', 'C', 'D'):
+        section = f'AXIS_{letter}'
+        if section not in ini:
+            continue
+        s = ini[section]
+        cfg['rapidcode']['axes'][letter] = {
+            'name':              s.get('description', f'Axis {letter}'),
+            'scaling':           float(s.get('scaling', 1.0)),
+            'gearbox':           float(s.get('gearbox', 1.0)),
+            'min_pos':           float(s.get('min', 0.0)),
+            'max_pos':           float(s.get('max', 360.0)),
+            'software_limit_deg': float(s.get('max', 360.0)),
+            'speed_min_dps':     float(s.get('speed_min', 0.0)),
+            'speed_max_dps':     float(s.get('speed_max', 360.0)),
+            'accel_min_dps2':    float(s.get('accel_min', 0.0)),
+            'accel_max_dps2':    float(s.get('accel_max', 720.0)),
+        }
+
+    # Sync Axis E into clearcore.axis_e
+    # Note: Axis E is controlled directly by the GUI via UDP, not through TIM service.
+    # The yaml sync keeps the service config consistent for reference/future routing.
+    if 'AXIS_E' in ini:
+        s = ini['AXIS_E']
+        if 'clearcore' not in cfg:
+            cfg['clearcore'] = {}
+        cfg['clearcore']['axis_e'] = {
+            'name':              s.get('description', 'Address Angle'),
+            'min_pos':           float(s.get('min', 0.0)),
+            'max_pos':           float(s.get('max', 45.0)),
+            'software_limit_deg': float(s.get('max', 45.0)),
+            'speed_min_dps':     float(s.get('speed_min', 0.0)),
+            'speed_max_dps':     float(s.get('speed_max', 100.0)),
+            'accel_min_dps2':    float(s.get('accel_min', 0.0)),
+            'accel_max_dps2':    float(s.get('accel_max', 100.0)),
+        }
+
+    try:
+        with open(yaml_path, 'w') as f:
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+        print(f'[INFO] Axis config synced from INI to {yaml_path}')
+    except Exception as e:
+        print(f'[WARNING] Could not write tim_config.yaml at {yaml_path}: {e}')
+
+
+sync_ini_to_yaml(INI_PATH)
 for axis in 'ABCDEFGH':
     section = f'AXIS_{axis}'
     if section in axis_ini:
@@ -786,12 +877,18 @@ def load_motion_defaults():
 
 
 def save_motion_defaults_from_values(values):
-    """Persist accel/decel values so they can be restored on next startup."""
+    """Persist speed/accel/decel values so they can be restored on next startup."""
     state = {'servos': {}}
     for i in range(1, 9):
+        speed_raw = str(values.get(f'S{i}_speed', '')).strip()
         accel_raw = str(values.get(f'S{i}_accel', '')).strip()
         decel_raw = str(values.get(f'S{i}_decel', '')).strip()
         entry = {}
+        try:
+            if speed_raw not in ('', '-', '.', '-.'):
+                entry['speed'] = float(speed_raw)
+        except Exception:
+            pass
         try:
             if accel_raw not in ('', '-', '.', '-.'):
                 entry['accel'] = float(accel_raw)
@@ -813,16 +910,30 @@ def save_motion_defaults_from_values(values):
 
 # [CHANGE 2026-03-24 11:29:00 -04:00] Rename startup defaults helper to reflect speed/accel/decel scope.
 def apply_startup_motion_defaults(window):
-    """Apply remembered accel/decel or fallback defaults at program startup."""
+    """Apply remembered speed/accel/decel or fallback defaults at program startup."""
     remembered = load_motion_defaults().get('servos', {})
     if not hasattr(window, '_last_setpoints') or not window._last_setpoints or len(window._last_setpoints) != 8:
         window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos', 'jog_amount']} for _ in range(8)]
 
+    def _is_blank_or_zero(raw):
+        s = str(raw).strip()
+        if s in ('', '-', '.', '-.'):
+            return True
+        try:
+            return abs(float(s)) < 1e-9
+        except Exception:
+            return False
+
     for i in range(1, 9):
         rem = remembered.get(str(i), {}) if isinstance(remembered, dict) else {}
+        speed_val = rem.get('speed', STARTUP_SPEED_DEFAULT)
         accel_val = rem.get('accel', STARTUP_ACCEL_DECEL_DEFAULT)
         decel_val = rem.get('decel', STARTUP_ACCEL_DECEL_DEFAULT)
 
+        try:
+            speed_fmt = format_display_value(float(speed_val))
+        except Exception:
+            speed_fmt = format_display_value(STARTUP_SPEED_DEFAULT)
         try:
             accel_fmt = format_display_value(float(accel_val))
         except Exception:
@@ -832,17 +943,31 @@ def apply_startup_motion_defaults(window):
         except Exception:
             decel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
 
+        speed_key = f'S{i}_speed'
         accel_key = f'S{i}_accel'
         decel_key = f'S{i}_decel'
+
+        has_remembered_speed = isinstance(rem, dict) and ('speed' in rem)
+        has_remembered_accel = isinstance(rem, dict) and ('accel' in rem)
+        has_remembered_decel = isinstance(rem, dict) and ('decel' in rem)
+
+        if speed_key in window.AllKeysDict:
+            current_speed = str(window[speed_key].get()).strip()
+            if has_remembered_speed or _is_blank_or_zero(current_speed):
+                window[speed_key].update(speed_fmt)
         if accel_key in window.AllKeysDict:
             current_accel = str(window[accel_key].get()).strip()
-            if current_accel in ('', '-', '.', '-.'):
+            if has_remembered_accel or _is_blank_or_zero(current_accel):
                 window[accel_key].update(accel_fmt)
         if decel_key in window.AllKeysDict:
             current_decel = str(window[decel_key].get()).strip()
-            if current_decel in ('', '-', '.', '-.'):
+            if has_remembered_decel or _is_blank_or_zero(current_decel):
                 window[decel_key].update(decel_fmt)
 
+        try:
+            window._last_setpoints[i - 1]['speed'] = float(speed_fmt)
+        except Exception:
+            window._last_setpoints[i - 1]['speed'] = STARTUP_SPEED_DEFAULT
         try:
             window._last_setpoints[i - 1]['accel'] = float(accel_fmt)
         except Exception:
@@ -855,6 +980,52 @@ def apply_startup_motion_defaults(window):
     # [CHANGE 2026-03-24 11:19:00 -04:00] Recompute midpoint speed labels after startup defaults are applied.
     for i in range(1, 9):
         update_mid_speed_display(window, i)
+
+
+def reset_motion_defaults(window, persist=True):
+    """Reset speed/accel/decel for all servos to startup defaults and optionally persist."""
+    speed_fmt = format_display_value(STARTUP_SPEED_DEFAULT)
+    accel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
+    decel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
+
+    if not hasattr(window, '_last_setpoints') or not window._last_setpoints or len(window._last_setpoints) != 8:
+        window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos', 'jog_amount']} for _ in range(8)]
+
+    for i in range(1, 9):
+        speed_key = f'S{i}_speed'
+        accel_key = f'S{i}_accel'
+        decel_key = f'S{i}_decel'
+
+        if speed_key in window.AllKeysDict:
+            window[speed_key].update(speed_fmt)
+        if accel_key in window.AllKeysDict:
+            window[accel_key].update(accel_fmt)
+        if decel_key in window.AllKeysDict:
+            window[decel_key].update(decel_fmt)
+
+        window._last_setpoints[i - 1]['speed'] = STARTUP_SPEED_DEFAULT
+        window._last_setpoints[i - 1]['accel'] = STARTUP_ACCEL_DECEL_DEFAULT
+        window._last_setpoints[i - 1]['decel'] = STARTUP_ACCEL_DECEL_DEFAULT
+
+    for i in range(1, 9):
+        update_mid_speed_display(window, i)
+
+    if persist:
+        state = {
+            'servos': {
+                str(i): {
+                    'speed': STARTUP_SPEED_DEFAULT,
+                    'accel': STARTUP_ACCEL_DECEL_DEFAULT,
+                    'decel': STARTUP_ACCEL_DECEL_DEFAULT,
+                }
+                for i in range(1, 9)
+            }
+        }
+        try:
+            with open(MOTION_DEFAULTS_FILE, 'w') as fh:
+                json.dump(state, fh)
+        except Exception:
+            pass
 # -----------------------------
 # Servo setup:Dictionary mapping each field to its min and max values (same for all servos)
 # Automatically generate command mappings for all 8 servos
@@ -869,6 +1040,7 @@ for i in range(1, 9):
     axis_letter = AXIS_LETTERS[i-1]
     GALIL_COMMAND_MAP[f'S{i}_enable'] = f'SH{axis_letter}'
     GALIL_COMMAND_MAP[f'S{i}_disable'] = f'MO{axis_letter}'
+    GALIL_COMMAND_MAP[f'S{i}_clear_faults'] = f'CF{axis_letter}'
     GALIL_COMMAND_MAP[f'S{i}_start'] = f'BG{axis_letter}'
     GALIL_COMMAND_MAP[f'S{i}_stop'] = f'ST{axis_letter}'
     GALIL_COMMAND_MAP[f'S{i}_jog'] = (lambda speed, axis=axis_letter: f'JG{axis}={speed};BG{axis}')
@@ -1224,6 +1396,7 @@ layout = [
             [
                 [
                     sg.Checkbox('Show Poll Logs', key='SHOW_POLL_LOGS', enable_events=True, default=False, font=GLOBAL_FONT),
+                    sg.Button('Reset Tuning', key='RESET_MOTION_DEFAULTS', size=(12,2), button_color=('white', '#808080'), font=GLOBAL_FONT),
                     sg.Button('Shutdown', key='SHUTDOWN', size=(10,2), button_color=('white', 'red'), font=GLOBAL_FONT),
                     sg.Button('E-STOP', key='ESTOP', size=(10,2), button_color=('white', '#C00000'), font=('Courier New', 10, 'bold'))
                 ]
@@ -1243,7 +1416,7 @@ _refresh_description_colors(window)
 # Restore saved ALL tab sequence state (repeat flag, enable flags, setpoints)
 restore_sequence_state(window, load_sequence_state())
 
-# [CHANGE 2026-03-24 11:19:00 -04:00] Apply remembered accel/decel startup defaults (fallback=10).
+# [CHANGE 2026-03-24 11:19:00 -04:00] Apply remembered speed/accel/decel startup defaults (fallback=10).
 apply_startup_motion_defaults(window)
 
 ###############################################################################
@@ -1485,7 +1658,7 @@ bind_jog_press_release(window)
 # Seed GUI setpoints/status from controller before starting polling
 initialize_setpoints_from_controller(window, comm)
 
-# [CHANGE 2026-03-24 11:19:00 -04:00] Re-apply startup accel/decel defaults for any unseeded fields.
+# [CHANGE 2026-03-24 11:19:00 -04:00] Re-apply startup speed/accel/decel defaults for any unseeded fields.
 apply_startup_motion_defaults(window)
 
 
@@ -1855,6 +2028,11 @@ def handle_servo_event(event, values):
                     else:
                         set_pending_highlight(window, servo_num, field)
                     if field in ('speed', 'accel', 'decel'):
+                        # Persist latest motion tuning immediately after a successful update.
+                        try:
+                            save_motion_defaults_from_values(values)
+                        except Exception:
+                            pass
                         update_mid_speed_display(window, servo_num)
                 except Exception as e:
                     import traceback
@@ -2700,12 +2878,16 @@ while True:
     # Ensure counters are initialized before use
     if not hasattr(window, '_invalid_resp_counters'):
         window._invalid_resp_counters = [0]*8
+    if not hasattr(window, '_consecutive_zero_actuals'):
+        window._consecutive_zero_actuals = [0]*8
     if not hasattr(window, '_last_valid_pos'):
         window._last_valid_pos = ['']*8
     if not hasattr(window, '_last_pos_update_ts'):
         window._last_pos_update_ts = [None]*8
     if not hasattr(window, '_limit_tripped'):
         window._limit_tripped = [False]*8
+    if not hasattr(window, '_limit_exceed_counts'):
+        window._limit_exceed_counts = [0]*8
     if not hasattr(window, '_jog_limit_hit'):
         window._jog_limit_hit = [False]*8
 
@@ -2757,6 +2939,19 @@ while True:
         except Exception as jog_limit_err:
             print(f'[DEBUG] Failed to handle JOG_LIMIT_HIT: {jog_limit_err}')
         continue
+
+    if event == 'RESET_MOTION_DEFAULTS':
+        answer = sg.popup_yes_no(
+            'Reset Speed/Acceleration/Deceleration for all servos to 10/10/10 and save as startup defaults?',
+            title='Reset Motion Defaults',
+            keep_on_top=True,
+        )
+        if answer == 'Yes':
+            reset_motion_defaults(window, persist=True)
+            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
+                window['DEBUG_LOG'].print('[INFO] Reset motion tuning defaults to speed=10, accel=10, decel=10 for all servos.')
+        continue
+
     if event == sg.WIN_CLOSED:
         window_closed = True
         if SEQ_STOP_EVENT is not None:
@@ -2769,7 +2964,7 @@ while True:
         except Exception:
             pass
         try:
-            # [CHANGE 2026-03-24 11:19:00 -04:00] Persist accel/decel for next startup.
+            # [CHANGE 2026-03-24 11:19:00 -04:00] Persist speed/accel/decel for next startup.
             save_motion_defaults_from_values(values)
         except Exception:
             pass
@@ -2845,13 +3040,28 @@ while True:
                     gearbox = axis_units.get('gearbox', 1)
                     pos_val_deg = pos_val_pulses / (pulses_per_degree * gearbox)
                     pos_val_disp = 0 if abs(pos_val_deg) < 1e-6 else round(pos_val_deg, 2)
-                    if not window_closed:
-                        window[f'S{i}_actual_pos'].update(str(pos_val_disp))
-                        update_setpoint_highlight(window, i, pos_val_deg)
-                    window._last_valid_pos[i-1] = str(pos_val_disp)
-                    window._last_pos_update_ts[i-1] = time.time()
-                    window._invalid_resp_counters[i-1] = 0
-                    valid = True
+                    # Robust: Only treat zero as valid if setpoint was zero or after 3 consecutive zero responses
+                    last_setpoint = getattr(window, '_last_setpoints', [{}]*8)[i-1].get('abs_pos', None)
+                    try:
+                        last_setpoint_zero = last_setpoint is not None and abs(float(last_setpoint)) < 1e-6
+                    except Exception:
+                        last_setpoint_zero = False
+                    consecutive_zero = getattr(window, '_consecutive_zero_actuals', [0]*8)
+                    # Suppress a zero reading only if we've previously seen a non-zero position
+                    # (motor was somewhere non-zero and is now falsely reading 0 during decel/stop).
+                    # Before the first real move, 0 is genuine and must be shown.
+                    last_known = window._last_valid_pos[i-1] if window._last_valid_pos[i-1] else ''
+                    has_seen_nonzero = last_known not in ('', '0', 'N/A')
+                    if pos_val_disp == 0 and not last_setpoint_zero and has_seen_nonzero:
+                        valid = False
+                    else:
+                        if not window_closed:
+                            window[f'S{i}_actual_pos'].update(str(pos_val_disp))
+                            update_setpoint_highlight(window, i, pos_val_deg)
+                        window._last_valid_pos[i-1] = str(pos_val_disp)
+                        window._last_pos_update_ts[i-1] = time.time()
+                        window._invalid_resp_counters[i-1] = 0
+                        valid = True
                 except Exception:
                     pass
             # Actual position in pulses display
@@ -2864,15 +3074,26 @@ while True:
                     if not window_closed:
                         window[f'S{i}_actual_pos_pulses'].update('N/A')
             # SAFETY: Stop motion if position exceeds soft limits OR absolute 360-degree rotation limit
-            if pos_val_deg is not None:
+            if pos_val_deg is not None and not SAFETY_LIMIT_STOPS_ENABLED:
+                window._limit_exceed_counts[i-1] = 0
+                window._limit_tripped[i-1] = False
+                window._jog_limit_hit[i-1] = False
+            if pos_val_deg is not None and SAFETY_LIMIT_STOPS_ENABLED:
                 axis_units = AXIS_UNITS[axis_letter]
                 min_val = axis_units['min']
                 max_val = axis_units['max']
                 # Absolute safety: never allow >360 degrees rotation
                 beyond_absolute_limit = abs(pos_val_deg) > ABSOLUTE_SAFETY_LIMIT_DEG
-                beyond_soft_limit = (pos_val_deg < min_val or pos_val_deg > max_val)
+                beyond_soft_limit = (pos_val_deg < min_val - LIMIT_SOFT_TOLERANCE_DEG or pos_val_deg > max_val + LIMIT_SOFT_TOLERANCE_DEG)
                 
-                if (beyond_soft_limit or beyond_absolute_limit) and not window._limit_tripped[i-1]:
+                if beyond_soft_limit or beyond_absolute_limit:
+                    window._limit_exceed_counts[i-1] += 1
+                    if not window_closed:
+                        window['DEBUG_LOG'].print(f'[LIMIT] Axis {axis_letter} out-of-range sample {window._limit_exceed_counts[i-1]}/{LIMIT_TRIP_CONFIRM_SAMPLES}: pos={pos_val_deg:.3f}° (soft {min_val-LIMIT_SOFT_TOLERANCE_DEG:.1f}..{max_val+LIMIT_SOFT_TOLERANCE_DEG:.1f}, abs±{ABSOLUTE_SAFETY_LIMIT_DEG:.0f})')
+                else:
+                    window._limit_exceed_counts[i-1] = 0
+
+                if (beyond_soft_limit or beyond_absolute_limit) and not window._limit_tripped[i-1] and window._limit_exceed_counts[i-1] >= LIMIT_TRIP_CONFIRM_SAMPLES:
                     stop_key = f'S{i}_stop'
                     stop_cmd = COMMAND_MAP.get(stop_key)
                     controller = get_comm_for_axis(axis_letter)
@@ -2905,28 +3126,53 @@ while True:
                 elif window._limit_tripped[i-1] and min_val <= pos_val_deg <= max_val:
                     # Clear limit indicator when back inside bounds
                     window._limit_tripped[i-1] = False
+                    window._limit_exceed_counts[i-1] = 0
                     if not window_closed:
                         window[f'S{i}_status_light'].update('●', text_color='#00FF00')
                         window[f'S{i}_status_text'].update('Enabled', text_color='#00FF00')
                 elif window._jog_limit_hit[i-1] and min_val < pos_val_deg < max_val:
                     # Clear jog limit indicator when back inside absolute bounds
                     window._jog_limit_hit[i-1] = False
+                    window._limit_exceed_counts[i-1] = 0
                     if not window_closed:
                         window[f'S{i}_status_light'].update('●', text_color='#00FF00')
                         window[f'S{i}_status_text'].update('Enabled', text_color='#00FF00')
+            # Robust actuals display: only accept zero if setpoint was zero or after 3 consecutive zero responses
+            debug_msgs = []
             if not valid:
                 window._invalid_resp_counters[i-1] += 1
+                last_setpoint = getattr(window, '_last_setpoints', [{}]*8)[i-1].get('abs_pos', None)
+                try:
+                    last_setpoint_zero = last_setpoint is not None and abs(float(last_setpoint)) < 1e-6
+                except Exception:
+                    last_setpoint_zero = False
+                consecutive_zero = getattr(window, '_consecutive_zero_actuals', [0]*8)
+                if pos_val_disp == 0:
+                    consecutive_zero[i-1] = consecutive_zero[i-1] + 1
+                else:
+                    consecutive_zero[i-1] = 0
+                window._consecutive_zero_actuals = consecutive_zero
+                debug_msgs.append(f'[DEBUG] Axis {axis_letter} raw={pos_resp} disp={pos_val_disp} setpoint={last_setpoint} zero_ctr={consecutive_zero[i-1]} valid={valid}')
                 if window._invalid_resp_counters[i-1] >= 5:
                     if not window_closed:
                         window[f'S{i}_actual_pos'].update('N/A')
                     log_val = 'N/A'
+                    debug_msgs.append(f'[DEBUG] Axis {axis_letter} display updated to N/A (invalid_ctr={window._invalid_resp_counters[i-1]})')
                 else:
                     last_val = window._last_valid_pos[i-1] if window._last_valid_pos[i-1] else ''
                     if not window_closed:
                         window[f'S{i}_actual_pos'].update(last_val)
                     log_val = last_val if last_val else 'N/A'
+                    debug_msgs.append(f'[DEBUG] Axis {axis_letter} display kept at last valid ({last_val})')
             else:
+                if hasattr(window, '_consecutive_zero_actuals'):
+                    window._consecutive_zero_actuals[i-1] = 0
                 log_val = window._last_valid_pos[i-1]
+                debug_msgs.append(f'[DEBUG] Axis {axis_letter} valid actual: {log_val}')
+            if not window_closed and LOG_POSITION_POLLS:
+                for msg in debug_msgs:
+                    window['DEBUG_LOG'].print(msg)
+
             if not window_closed and LOG_POSITION_POLLS:
                 window['DEBUG_LOG'].print(f'Axis {axis_letter}: MG _RP{axis_letter} -> {log_val}')
         continue
@@ -3090,6 +3336,9 @@ while True:
         if event.endswith('_ok'):
             print(f'[DEBUG] Main loop routing event to handle_servo_event: {event}')
             handle_servo_event(event, values)
+            # Add polling pause after setpoint changes
+            import time
+            time.sleep(1)  # Pause polling for 1 second after setpoint change
             continue
         # Otherwise, handle direct motor control buttons (Enable, Disable, Start, Stop, Jog) by reusing handle_servo_event
         # to ensure a single code path with consistent scaling logic.
