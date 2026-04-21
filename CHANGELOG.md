@@ -4,7 +4,7 @@ All notable changes to the ControllerGUI / TIM Motion Service are documented her
 
 ---
 
-## [Unreleased] — 2026-04-21
+## [Unreleased] — 2026-04-21 (session 2)
 
 ### TIM Service — `tim_motion_server.py`
 - **Fix: TCP receive buffer discard bug** — `_recv_line` was discarding all data after the first `\n` in a batched TCP packet (Nagle coalescing). Commands 2+ in a batch were silently dropped, leaving the GUI waiting for responses that never came. Replaced with a persistent per-client `recv_buf` that retains leftover data across reads.
@@ -15,6 +15,25 @@ All notable changes to the ControllerGUI / TIM Motion Service are documented her
 
 ### GUI — `ControllerGUI.py`
 - **Fix: Genuine zero actuals suppressed as N/A** — When a reversed axis parks at 0° (its natural end-of-travel), the GUI's zero-suppression logic previously rejected the reading as spurious after seeing prior non-zero values, eventually showing N/A. Fixed by accepting 0° as genuine after 3 consecutive zero readings (uses the existing `_consecutive_zero_actuals` counter that was tracked but not wired into the validity check).
+
+---
+
+## [2026-04-21] — commits `b68f184`, `c3fe668`
+
+### GUI — `ControllerGUI.py`
+- **Feature: Reconnect button** — Added per-servo Reconnect button next to the Link indicator. Calls `_reconnect_rsi()` on the appropriate comm object without restarting the GUI. Result logged to debug window.
+- **Feature: Comm errors in GUI log** — Custom `logging.Handler` posts `WARNING`/`ERROR` records from all modules (including `communications.py`) to the GUI debug log via `write_event_value`. No terminal needed to see comm errors.
+- **Fix: Jogging for Axes A-D** — `PR` stages a move in RapidCode but `BG` is required to execute it. Jog now sends `SP`/`AC`/`DC`/`PR`/`BG` in sequence. Previously no motion occurred on jog for A-D.
+- **Fix: Jog direction on reversed axes** — CW/CCW sign is flipped for axes with `reverse = true` in the INI so CW = toward backswing and CCW = toward finish.
+- **Fix: Jog limit indicator not clearing** — Indicator now clears immediately when a jog succeeds in the opposite direction rather than waiting for the POSITION_POLL `elif` chain.
+- **Fix: Jog blocked by stale startup actuals** — Pre-jog limit enforcement now requires `pos_is_fresh` (position updated within 1.5s). Dirty startup actuals no longer falsely block valid jogs.
+- **Cleanup:** Removed `import time as _time` inside function body; use module-level `time` import.
+
+### Config — `controller_config.ini`
+- **Added `reverse = true` to `[AXIS_A]`** — Single source of truth for direction reversal, read by both GUI (`AXIS_UNITS`) and TIM service adapter.
+
+### TIM Service — `tim_rapidcode_adapter.py`
+- **Cleanup:** Removed stale `TODO: Implement EtherCAT slave discovery` comment — ENI file rebuild covers this at the hardware level.
 
 ---
 

@@ -2506,16 +2506,15 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
 
     pos_is_fresh = True
     try:
-        import time as _time
         if hasattr(window, '_last_pos_update_ts') and len(window._last_pos_update_ts) >= servo_num:
             ts = window._last_pos_update_ts[servo_num - 1]
-            pos_is_fresh = (ts is not None) and ((_time.time() - float(ts)) <= 1.5)
+            pos_is_fresh = (ts is not None) and ((time.time() - float(ts)) <= 1.5)
     except Exception:
         pos_is_fresh = True
 
-    # [CHANGE 2026-03-24 16:30:00 -04:00] Disable Axis E pre-jog limit gate due to false stale-position min-limit trips.
-    # Axis E still has runtime safety stop enforcement in POSITION_POLL limit checks.
-    enforce_limit = current_pos is not None and axis_letter != 'E'
+    # Don't enforce pre-jog limits on stale positions — dirty startup actuals
+    # can falsely show 0° and block valid jogs. POSITION_POLL enforces limits at runtime.
+    enforce_limit = current_pos is not None and axis_letter != 'E' and pos_is_fresh
 
     if enforce_limit:
         if signed_speed > 0 and current_pos >= max_val:
@@ -2545,6 +2544,12 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
         try:
             response = comm.send_command(cmd)
             print(f'[DEBUG] JOG one-shot command: {cmd} -> {response}')
+            # Successful jog — clear any jog limit indicator for this axis.
+            if hasattr(window, '_jog_limit_hit'):
+                window._jog_limit_hit[servo_num - 1] = False
+                window[f'S{servo_num}_status_light'].update('●', text_color='#00FF00')
+                window[f'S{servo_num}_status_text'].update('Enabled', text_color='#00FF00')
+
             if axis_letter in ('A', 'B', 'C', 'D'):
                 # RapidCode axes: stage speed/accel/decel then fire with BG.
                 # PR only stages the distance; motion profile must be explicit.

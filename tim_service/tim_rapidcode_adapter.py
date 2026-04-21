@@ -569,9 +569,6 @@ class RapidCodeAdapter:
                         except Exception as lim_err:
                             logger.warning("Axis %s %s failed: %s", chr(65 + axis_idx), method_name, lim_err)
 
-            # Discover and enable EtherCAT slaves
-            # TODO: Implement EtherCAT slave discovery
-
         except Exception as e:
             logger.error(f"Failed to initialize RapidCode: {e}")
             raise
