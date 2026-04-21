@@ -171,6 +171,7 @@ FUNCTIONS DEFINED IN THIS FILE:
 # Imports and Configuration
 # ============================================================================
 import FreeSimpleGUI as sg
+import logging
 import threading  # For future use if needed
 import platform   # Cross-platform OS detection and adaptation
 import configparser
@@ -1082,7 +1083,9 @@ def build_servo_tab(servo_num):
         [sg.Text('Link:', font=GLOBAL_FONT),
          sg.Text('●', key=f'S{servo_num}_comm_indicator', font=('Courier New', 14), text_color='gray',
              tooltip='Controller communications health (green=OK, red=failed, gray=not configured)'),
-         sg.Text('—', key=f'S{servo_num}_comm_label', font=GLOBAL_FONT, text_color='gray', size=(18,1))],
+         sg.Text('—', key=f'S{servo_num}_comm_label', font=GLOBAL_FONT, text_color='gray', size=(12,1)),
+         sg.Button('Reconnect', key=f'S{servo_num}_reconnect', font=GLOBAL_FONT, size=(10,1),
+             button_color=('white', '#444444'), tooltip='Re-establish controller communications link')],
         [sg.Text('Description:', size=(18,1), font=GLOBAL_FONT),
          sg.Input(
              default_text=desc_default,
@@ -1363,6 +1366,22 @@ layout = [
 ]
 
 window = sg.Window("Controller GUI", layout, size=(800, 540), font=GLOBAL_FONT, finalize=True, return_keyboard_events=True, resizable=True)
+
+# Route WARNING+ log records to the GUI debug log so comm errors are visible
+# without a terminal session open.
+class _GUILogHandler(logging.Handler):
+    def __init__(self, win):
+        super().__init__(level=logging.WARNING)
+        self._win = win
+    def emit(self, record):
+        try:
+            self._win.write_event_value('GUI_LOG', self.format(record))
+        except Exception:
+            pass
+
+_gui_log_handler = _GUILogHandler(window)
+_gui_log_handler.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
+logging.getLogger().addHandler(_gui_log_handler)
 
 # Enforce description field colors after window creation
 _refresh_description_colors(window)
@@ -2937,6 +2956,12 @@ while True:
             pass
         break
 
+    # Logging errors/warnings forwarded from background threads and communications.py
+    if event == 'GUI_LOG':
+        msg = values.get('GUI_LOG', '')
+        if msg and not window_closed:
+            window['DEBUG_LOG'].print(msg)
+
     # [CHANGE 2026-04-17 00:00:00 -04:00] Comm health: update per-axis link indicator dots.
     if event == 'COMM_HEALTH':
         health_data = values.get('COMM_HEALTH', {})
@@ -3144,6 +3169,23 @@ while True:
             if not window_closed and LOG_POSITION_POLLS:
                 window['DEBUG_LOG'].print(f'Axis {axis_letter}: MG _RP{axis_letter} -> {log_val}')
         continue
+    # Reconnect button — re-establishes the TCP/UDP link for this axis's controller
+    if isinstance(event, str) and event.endswith('_reconnect'):
+        try:
+            servo_num = int(event[1:event.index('_')])
+            axis_letter = AXIS_LETTERS[servo_num - 1]
+            target_comm = get_comm_for_axis(axis_letter)
+            if target_comm is not None and hasattr(target_comm, '_reconnect_rsi'):
+                success = target_comm._reconnect_rsi()
+                msg = 'Reconnected successfully.' if success else 'Reconnect failed — check service is running.'
+            elif target_comm is not None:
+                msg = 'Link uses UDP (ClearCore) — no explicit reconnect needed.'
+            else:
+                msg = 'No comm object configured for this axis.'
+            window['DEBUG_LOG'].print(f'[RECONNECT] Axis {axis_letter}: {msg}')
+        except Exception as _re:
+            window['DEBUG_LOG'].print(f'[RECONNECT] Error: {_re}')
+
     # Zero Position button (handle early so it isn't swallowed by generic S*_action logic)
     if isinstance(event, str) and event.endswith('_zero_pos'):
         try:
