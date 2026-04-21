@@ -981,52 +981,6 @@ def apply_startup_motion_defaults(window):
     # [CHANGE 2026-03-24 11:19:00 -04:00] Recompute midpoint speed labels after startup defaults are applied.
     for i in range(1, 9):
         update_mid_speed_display(window, i)
-
-
-def reset_motion_defaults(window, persist=True):
-    """Reset speed/accel/decel for all servos to startup defaults and optionally persist."""
-    speed_fmt = format_display_value(STARTUP_SPEED_DEFAULT)
-    accel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
-    decel_fmt = format_display_value(STARTUP_ACCEL_DECEL_DEFAULT)
-
-    if not hasattr(window, '_last_setpoints') or not window._last_setpoints or len(window._last_setpoints) != 8:
-        window._last_setpoints = [{f: None for f in ['speed', 'accel', 'decel', 'abs_pos', 'rel_pos', 'jog_amount']} for _ in range(8)]
-
-    for i in range(1, 9):
-        speed_key = f'S{i}_speed'
-        accel_key = f'S{i}_accel'
-        decel_key = f'S{i}_decel'
-
-        if speed_key in window.AllKeysDict:
-            window[speed_key].update(speed_fmt)
-        if accel_key in window.AllKeysDict:
-            window[accel_key].update(accel_fmt)
-        if decel_key in window.AllKeysDict:
-            window[decel_key].update(decel_fmt)
-
-        window._last_setpoints[i - 1]['speed'] = STARTUP_SPEED_DEFAULT
-        window._last_setpoints[i - 1]['accel'] = STARTUP_ACCEL_DECEL_DEFAULT
-        window._last_setpoints[i - 1]['decel'] = STARTUP_ACCEL_DECEL_DEFAULT
-
-    for i in range(1, 9):
-        update_mid_speed_display(window, i)
-
-    if persist:
-        state = {
-            'servos': {
-                str(i): {
-                    'speed': STARTUP_SPEED_DEFAULT,
-                    'accel': STARTUP_ACCEL_DECEL_DEFAULT,
-                    'decel': STARTUP_ACCEL_DECEL_DEFAULT,
-                }
-                for i in range(1, 9)
-            }
-        }
-        try:
-            with open(MOTION_DEFAULTS_FILE, 'w') as fh:
-                json.dump(state, fh)
-        except Exception:
-            pass
 # -----------------------------
 # Servo setup:Dictionary mapping each field to its min and max values (same for all servos)
 # Automatically generate command mappings for all 8 servos
@@ -1397,7 +1351,6 @@ layout = [
             [
                 [
                     sg.Checkbox('Show Poll Logs', key='SHOW_POLL_LOGS', enable_events=True, default=False, font=GLOBAL_FONT),
-                    sg.Button('Reset Tuning', key='RESET_MOTION_DEFAULTS', size=(12,2), button_color=('white', '#808080'), font=GLOBAL_FONT),
                     sg.Button('Shutdown', key='SHUTDOWN', size=(10,2), button_color=('white', 'red'), font=GLOBAL_FONT),
                     sg.Button('E-STOP', key='ESTOP', size=(10,2), button_color=('white', '#C00000'), font=('Courier New', 10, 'bold'))
                 ]
@@ -1442,6 +1395,30 @@ def send_axis_command(axis_letter, cmd):
     if controller is None:
         return False
     return controller.send_command(cmd)
+
+
+def push_motion_defaults_to_controller(window):
+    """Send saved speed/accel/decel to the controller at startup so the TIM service
+    has correct values without the user having to click OK on each field."""
+    for i in range(1, 5):  # Axes A-D (Servos 1-4) only
+        axis_letter = AXIS_LETTERS[i - 1]
+        if not hasattr(window, '_last_setpoints') or len(window._last_setpoints) < i:
+            continue
+        sp = window._last_setpoints[i - 1]
+        scaling = AXIS_UNITS.get(axis_letter, {}).get('scaling', 1)
+        gearbox = AXIS_UNITS.get(axis_letter, {}).get('gearbox', 1)
+        for field, cmd_prefix in (('speed', 'SP'), ('accel', 'AC'), ('decel', 'DC')):
+            val = sp.get(field)
+            if val is None:
+                continue
+            try:
+                pulses = int(round(float(val) * scaling * gearbox))
+                send_axis_command(axis_letter, f'{cmd_prefix}{axis_letter}={pulses}')
+            except Exception as e:
+                logging.warning(f'Startup push {cmd_prefix} for axis {axis_letter} failed: {e}')
+
+
+push_motion_defaults_to_controller(window)
 
 
 def sync_axis_e_actual_from_commanded(window, servo_num=5):
@@ -2941,17 +2918,6 @@ while True:
             print(f'[DEBUG] Failed to handle JOG_LIMIT_HIT: {jog_limit_err}')
         continue
 
-    if event == 'RESET_MOTION_DEFAULTS':
-        answer = sg.popup_yes_no(
-            'Reset Speed/Acceleration/Deceleration for all servos to 10/10/10 and save as startup defaults?',
-            title='Reset Motion Defaults',
-            keep_on_top=True,
-        )
-        if answer == 'Yes':
-            reset_motion_defaults(window, persist=True)
-            if not window_closed and 'DEBUG_LOG' in window.AllKeysDict:
-                window['DEBUG_LOG'].print('[INFO] Reset motion tuning defaults to speed=10, accel=10, decel=10 for all servos.')
-        continue
 
     if event == sg.WIN_CLOSED:
         window_closed = True

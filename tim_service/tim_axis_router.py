@@ -75,6 +75,20 @@ class AxisRouter:
         axis = self._extract_axis(command)
         
         if axis is None:
+            # Bare "ST" with no axis letter = broadcast stop all axes.
+            if command == 'ST':
+                results = []
+                for ax in ('A', 'B', 'C', 'D'):
+                    try:
+                        results.append(self.rapidcode.handle_command(f'ST{ax}', ax))
+                    except Exception as e:
+                        logger.error("Broadcast ST failed for axis %s: %s", ax, e)
+                try:
+                    results.append(self.clearcore.handle_command('STE', 'E'))
+                except Exception as e:
+                    logger.error("Broadcast ST failed for axis E: %s", e)
+                logger.info("Broadcast ST sent to all axes: %s", results)
+                return "1"
             logger.warning(f"Could not determine axis from command: {command}")
             return "0"
         

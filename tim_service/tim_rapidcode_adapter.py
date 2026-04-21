@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import importlib
+import time
 import importlib.util
 import sys
 from pathlib import Path
@@ -71,6 +72,7 @@ class RapidCodeAdapter:
         self._axis_user_units_mode = {}
         self._axis_units_fallback_logged = set()
         self._pending_motion = {}
+        self._motion_start_time = {}
         self.axis_configs = self.config.get('axes', {})
         if not self.axis_configs:
             # yaml has no axes section — fall back to INI (e.g. service started before GUI synced)
@@ -273,6 +275,71 @@ class RapidCodeAdapter:
         except Exception as e:
             logger.warning("Failed to query RapidCode network log messages: %s", e)
     
+    def _post_network_start_axis_init(self):
+        """Query axis count, cache axis objects, apply UserUnitsSet and software limits.
+
+        Must be called after NetworkStart() because AxisCountGet() returns 0 before
+        the EtherCAT network is operational.
+        """
+        axis_count_get = getattr(self.rmp, 'AxisCountGet', None)
+        self.axis_count = int(axis_count_get()) if callable(axis_count_get) else 0
+        logger.info("RapidCode axis count after NetworkStart: %s", self.axis_count)
+
+        axis_method = None
+        if hasattr(self.rmp, 'Axis'):
+            axis_method = self.rmp.Axis
+            self._axis_accessor = 'Axis'
+        elif hasattr(self.rmp, 'AxisGet'):
+            axis_method = self.rmp.AxisGet
+            self._axis_accessor = 'AxisGet'
+        if axis_method:
+            for i in range(self.axis_count):
+                try:
+                    self._axes[i] = axis_method(i)
+                    logger.info("Axis %s cached: %s", chr(65 + i), self._axes[i])
+                except Exception as cache_err:
+                    logger.error("Failed to cache axis %s: %s", chr(65 + i), cache_err)
+        else:
+            logger.error("RapidCode controller has no Axis/AxisGet accessor")
+
+        for axis_idx in range(self.axis_count):
+            axis = self._get_axis(axis_idx)
+            if axis is None:
+                continue
+            pulse_scale = self._pulse_scale(axis_idx)
+            if pulse_scale == 1.0:
+                self._axis_user_units_mode[axis_idx] = 'native'
+                logger.info("Axis %s UserUnitsSet skipped (passthrough mode)", chr(65 + axis_idx))
+            else:
+                try:
+                    self._call_axis_method(axis, ('UserUnitsSet',), pulse_scale)
+                    self._axis_user_units_mode[axis_idx] = 'degrees'
+                    logger.info("Axis %s UserUnitsSet=%s counts/deg", chr(65 + axis_idx), pulse_scale)
+                except Exception as unit_err:
+                    self._axis_user_units_mode[axis_idx] = 'native'
+                    logger.warning(
+                        "Axis %s UserUnitsSet skipped/failed; falling back to native units: %s",
+                        chr(65 + axis_idx), unit_err,
+                    )
+
+            axis_cfg = self._get_axis_config(axis_idx)
+            min_pos = float(axis_cfg.get('min_pos', -360.0))
+            max_pos = float(axis_cfg.get('software_limit_deg', axis_cfg.get('max_pos', 360.0)))
+            if self._axis_user_units_mode.get(axis_idx) == 'native':
+                min_pos = min_pos * pulse_scale if pulse_scale != 1.0 else min_pos
+                max_pos = max_pos * pulse_scale if pulse_scale != 1.0 else max_pos
+            try:
+                lim_high = getattr(axis, 'SoftwareLimitHighSet', None)
+                lim_low  = getattr(axis, 'SoftwareLimitLowSet',  None)
+                if callable(lim_high) and callable(lim_low):
+                    lim_high(max_pos)
+                    lim_low(min_pos)
+                    logger.info("Axis %s software limits set: low=%s high=%s", chr(65 + axis_idx), min_pos, max_pos)
+                else:
+                    logger.warning("Axis %s SoftwareLimitHighSet/LowSet not available", chr(65 + axis_idx))
+            except Exception as lim_err:
+                logger.warning("Axis %s software limit set failed: %s", chr(65 + axis_idx), lim_err)
+
     def _init_rapidcode(self):
         """Initialize real RapidCode connection."""
         # [CHANGE 2026-04-11 16:20:00 -05:00] Add RSI 11.x and INtime runtime paths in-process
@@ -348,73 +415,13 @@ class RapidCodeAdapter:
 
             serial_get = getattr(self.rmp, 'SerialNumberGet', None)
             firmware_get = getattr(self.rmp, 'FirmwareVersionGet', None)
-            axis_count_get = getattr(self.rmp, 'AxisCountGet', None)
             serial = serial_get() if callable(serial_get) else 'unknown'
             firmware = firmware_get() if callable(firmware_get) else 'unknown'
-            self.axis_count = int(axis_count_get()) if callable(axis_count_get) else 0
             logger.info("RapidCode connected to real hardware (serial=%s, firmware=%s)", serial, firmware)
-            logger.info("RapidCode reported configured axis count: %s", self.axis_count)
 
-            # Cache axis objects now (in this thread) so cross-thread calls are safe.
-            axis_method = None
-            if hasattr(self.rmp, 'Axis'):
-                axis_method = self.rmp.Axis
-                self._axis_accessor = 'Axis'
-            elif hasattr(self.rmp, 'AxisGet'):
-                axis_method = self.rmp.AxisGet
-                self._axis_accessor = 'AxisGet'
-            if axis_method:
-                for i in range(self.axis_count):
-                    try:
-                        self._axes[i] = axis_method(i)
-                        logger.info("Axis %s cached: %s", chr(65 + i), self._axes[i])
-                    except Exception as cache_err:
-                        logger.error("Failed to cache axis %s: %s", chr(65 + i), cache_err)
-            else:
-                logger.error("RapidCode controller has no Axis/AxisGet accessor")
-
-            # Configure axis user units from yaml scaling so RapidCode moves use degrees.
-            # UserUnitsSet must be called before NetworkStart to take effect on hardware.
-            for axis_idx in range(self.axis_count):
-                axis = self._get_axis(axis_idx)
-                if axis is None:
-                    continue
-                pulse_scale = self._pulse_scale(axis_idx)
-                if pulse_scale == 1.0:
-                    self._axis_user_units_mode[axis_idx] = 'native'
-                    logger.info("Axis %s UserUnitsSet skipped (passthrough mode)", chr(65 + axis_idx))
-                else:
-                    try:
-                        self._call_axis_method(axis, ('UserUnitsSet',), pulse_scale)
-                        self._axis_user_units_mode[axis_idx] = 'degrees'
-                        logger.info("Axis %s UserUnitsSet=%s counts/deg", chr(65 + axis_idx), pulse_scale)
-                    except Exception as unit_err:
-                        self._axis_user_units_mode[axis_idx] = 'native'
-                        logger.warning(
-                            "Axis %s UserUnitsSet skipped/failed; falling back to native units: %s",
-                            chr(65 + axis_idx), unit_err,
-                        )
-
-                # Set software limits from yaml config so RapidSetup values are irrelevant.
-                # Limits are in user units when UserUnitsSet succeeds, native counts otherwise.
-                axis_cfg = self._get_axis_config(axis_idx)
-                min_pos = float(axis_cfg.get('min_pos', -360.0))
-                max_pos = float(axis_cfg.get('software_limit_deg', axis_cfg.get('max_pos', 360.0)))
-                if self._axis_user_units_mode.get(axis_idx) == 'native':
-                    # In native mode the limits must be in encoder counts.
-                    min_pos = min_pos * pulse_scale if pulse_scale != 1.0 else min_pos
-                    max_pos = max_pos * pulse_scale if pulse_scale != 1.0 else max_pos
-                try:
-                    lim_high = getattr(axis, 'SoftwareLimitHighSet', None)
-                    lim_low  = getattr(axis, 'SoftwareLimitLowSet',  None)
-                    if callable(lim_high) and callable(lim_low):
-                        lim_high(max_pos)
-                        lim_low(min_pos)
-                        logger.info("Axis %s software limits set: low=%s high=%s", chr(65 + axis_idx), min_pos, max_pos)
-                    else:
-                        logger.warning("Axis %s SoftwareLimitHighSet/LowSet not available; relying on RapidSetup limits", chr(65 + axis_idx))
-                except Exception as lim_err:
-                    logger.warning("Axis %s software limit set failed: %s", chr(65 + axis_idx), lim_err)
+            # [CHANGE 2026-04-20] Axis count and caching moved to after NetworkStart.
+            # AxisCountGet() returns 0 before the EtherCAT network is up; querying it
+            # here caused all axes to be skipped (UserUnitsSet, limits, CSP mode).
 
             # [CHANGE 2026-04-17 17:10:00 -04:00] Start/diagnose EtherCAT network explicitly at service startup.
             network_state_get = getattr(self.rmp, 'NetworkStateGet', None)
@@ -446,6 +453,7 @@ class RapidCodeAdapter:
                         network_start()
                         logger.info("RapidCode NetworkStart() succeeded from %s", startup_dir)
                         network_started = True
+                        self._post_network_start_axis_init()
                         break
                     except Exception as net_start_err:
                         logger.warning("RapidCode NetworkStart() failed from %s: %s", startup_dir, net_start_err)
@@ -466,6 +474,7 @@ class RapidCodeAdapter:
                                 network_start()
                                 logger.info("RapidCode NetworkStart() succeeded after RMPnetwork.rta copy")
                                 network_started = True
+                                self._post_network_start_axis_init()
                             finally:
                                 os.chdir(start_cwd)
                     except Exception as copy_or_retry_err:
@@ -482,6 +491,7 @@ class RapidCodeAdapter:
                             logger.warning('Could not read LastNetworkStartError: %s', last_err)
             elif callable(network_start):
                 logger.info("RapidCode network already OPERATIONAL; skipping NetworkStart()")
+                self._post_network_start_axis_init()
             if callable(network_state_get):
                 try:
                     logger.info("RapidCode network state after start: %s", network_state_get())
@@ -645,50 +655,6 @@ class RapidCodeAdapter:
             return float(match.group(1))
         return 0.0
     
-    def _handle_enable(self, axis_idx):
-        """Enable axis."""
-        try:
-            axis = self._get_axis(axis_idx)
-            logger.info("DBG enable: idx=%s axis=%r type=%s is_none=%s axes_keys=%s count=%s",
-                        axis_idx, axis, type(axis).__name__, axis is None,
-                        list(self._axes.keys()), self.axis_count)
-            if axis is None:
-                logger.error(f"Enable failed: axis object unavailable for {chr(65+axis_idx)}")
-                return "0"
-            # [CHANGE 2026-04-17 16:00:00 -04:00] Real hardware path implemented.
-            try:
-                self._call_axis_method(axis, ('Abort', 'Stop'))
-            except Exception as stop_err:
-                logger.warning(f"Axis {chr(65+axis_idx)} pre-enable stop/abort warning: {stop_err}")
-
-            # ClearFaults can throw transient STOPPING errors if the axis is still settling from Abort/Stop.
-            # Treat as recoverable and continue with enable attempts.
-            try:
-                self._call_axis_method(axis, ('ClearFaults',))
-            except Exception as clear_err:
-                logger.warning(f"Axis {chr(65+axis_idx)} ClearFaults warning before enable: {clear_err}")
-
-            # RSI samples use AmpEnableSet(True, 750) on hardware.
-            try:
-                self._call_axis_method(axis, ('AmpEnableSet',), True, 750)
-            except Exception as enable_err:
-                logger.warning(f"Axis {chr(65+axis_idx)} first enable attempt failed; retrying: {enable_err}")
-                try:
-                    self._call_axis_method(axis, ('Abort', 'Stop'))
-                except Exception:
-                    pass
-                try:
-                    self._call_axis_method(axis, ('ClearFaults',))
-                except Exception:
-                    pass
-                self._call_axis_method(axis, ('AmpEnableSet',), True, 750)
-
-            logger.info(f"Axis {chr(65+axis_idx)} enabled")
-            return "1"
-        except Exception as e:
-            logger.error(f"Failed to enable axis {axis_idx}: {e}")
-            return "0"
-    
     def _handle_disable(self, axis_idx):
         """Disable axis."""
         try:
@@ -789,9 +755,6 @@ class RapidCodeAdapter:
         except Exception as e:
             logger.error(f"Failed to enable axis {axis_idx}: {e}", exc_info=True)
             return "0"
-        except Exception as e:
-            logger.error(f"Failed to clear position on axis {axis_idx}: {e}")
-            return "0"
 
     def _handle_clear_faults(self, axis_idx):
         """Clear axis faults without enabling motion."""
@@ -865,6 +828,11 @@ class RapidCodeAdapter:
             logger.error(f"Failed to query speed on axis {axis_idx}: {e}")
             return "0"
     
+    def _handle_clear_position(self, axis_idx):
+        """Zero the position register — software offset approach not yet implemented."""
+        logger.info("Axis %s Zero Position requested (not yet implemented)", chr(65 + axis_idx))
+        return "1"
+
     def _handle_stop(self, axis_idx):
         """Stop axis motion."""
         try:
@@ -899,13 +867,19 @@ class RapidCodeAdapter:
                 except Exception as amp_state_err:
                     logger.warning(f"Axis {chr(65+axis_idx)} AmpEnableGet failed: {amp_state_err}")
 
-            # [CHANGE 2026-04-17 18:15:00 -04:00] Ignore duplicate BG while axis is already in motion.
+            # Ignore duplicate BG while axis is in motion, but time out after 10s to avoid
+            # getting stuck when MotionDoneGet never clears (e.g. zero-distance move).
             motion_done_get = getattr(axis, 'MotionDoneGet', None)
             if callable(motion_done_get):
                 try:
                     if not bool(motion_done_get()):
-                        logger.info(f"Axis {chr(65+axis_idx)} BG ignored; motion already in progress")
-                        return "1"
+                        start_time = self._motion_start_time.get(axis_idx)
+                        elapsed = (time.time() - start_time) if start_time else 999
+                        if elapsed < 10.0:
+                            logger.info(f"Axis {chr(65+axis_idx)} BG ignored; motion already in progress ({elapsed:.1f}s)")
+                            return "1"
+                        else:
+                            logger.warning(f"Axis {chr(65+axis_idx)} MotionDoneGet stuck after {elapsed:.1f}s; forcing new move")
                 except Exception:
                     pass
 
@@ -959,6 +933,7 @@ class RapidCodeAdapter:
                 logger.info(f"Axis {chr(65+axis_idx)} BG received with no staged motion")
                 return "0"
 
+            self._motion_start_time[axis_idx] = time.time()
             logger.info(f"Axis {chr(65+axis_idx)} motion started via {method_used}")
             # One-shot consume of staged target so repeated BG doesn't re-issue unexpectedly.
             pending['mode'] = None
