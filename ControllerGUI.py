@@ -338,6 +338,7 @@ for axis in 'ABCDEFGH':
             'degrees': float(axis_ini[section]['degrees']),
             'scaling': float(axis_ini[section]['scaling']),
             'gearbox': float(axis_ini[section]['gearbox']),
+            'reverse': axis_ini[section].get('reverse', 'false').strip().lower() == 'true',
             'speed_min': float(axis_ini[section].get('speed_min', '0')),
             'speed_max': float(axis_ini[section].get('speed_max', '360')),
             'accel_min': float(axis_ini[section].get('accel_min', '0')),
@@ -2489,9 +2490,10 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
         return
 
     sign = 1 if str(direction).lower() == 'cw' else -1
-    signed_speed = speed_val * sign
-
     axis_units = AXIS_UNITS.get(axis_letter, {})
+    if axis_units.get('reverse', False):
+        sign = -sign
+    signed_speed = speed_val * sign
     scaling = axis_units.get('scaling', 1) or 1
     gearbox = axis_units.get('gearbox', 1) or 1
     min_val = axis_units.get('min', NUMERIC_LIMITS['abs_pos'][0])
@@ -2543,7 +2545,24 @@ def handle_jog_press(window, servo_num, direction, is_press, values):
         try:
             response = comm.send_command(cmd)
             print(f'[DEBUG] JOG one-shot command: {cmd} -> {response}')
-            if axis_letter == 'E':
+            if axis_letter in ('A', 'B', 'C', 'D'):
+                # RapidCode axes: stage speed/accel/decel then fire with BG.
+                # PR only stages the distance; motion profile must be explicit.
+                sp_pulses = int(round(speed_val * scaling * gearbox))
+                accel_str = str(values.get(f'S{servo_num}_accel', '')).strip()
+                decel_str = str(values.get(f'S{servo_num}_decel', '')).strip()
+                try:
+                    accel_pulses = int(round(float(accel_str) * scaling * gearbox)) if accel_str else sp_pulses * 2
+                    decel_pulses = int(round(float(decel_str) * scaling * gearbox)) if decel_str else sp_pulses * 2
+                except ValueError:
+                    accel_pulses = sp_pulses * 2
+                    decel_pulses = sp_pulses * 2
+                comm.send_command(f'SP{axis_letter}={sp_pulses}')
+                comm.send_command(f'AC{axis_letter}={accel_pulses}')
+                comm.send_command(f'DC{axis_letter}={decel_pulses}')
+                bg_response = comm.send_command(f'BG{axis_letter}')
+                print(f'[DEBUG] JOG BG{axis_letter} -> {bg_response}')
+            elif axis_letter == 'E':
                 # [CHANGE 2026-03-27 11:50:00 -04:00] Servo E PRE updates commanded cache; mirror it without applying a second delta.
                 jog_ok = not (
                     response is False or
