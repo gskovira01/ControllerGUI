@@ -19,6 +19,7 @@ rapidcode:
       min_pos: 0
       max_pos: 180
       software_limit_deg: 180
+      reverse: true
       speed_min_dps: 0
       speed_max_dps: 360
       accel_min_dps2: 0
@@ -35,7 +36,7 @@ rapidcode:
       speed_max_dps: 360
       accel_min_dps2: 0
       accel_max_dps2: 720
-      jerk: 20
+      jerk: 75
     C:
       name: Tertiary Rotation X8
       scaling: 364.0888

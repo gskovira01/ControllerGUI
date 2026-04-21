@@ -190,6 +190,66 @@ These notes capture what was required to get real hardware motion working (GUI l
 3. Enable axis and issue a small absolute move (e.g., 10 deg).
 4. Verify position readback updates and no persistent fault state remains.
 
+## Reversing Axis Direction
+
+Some motors are mounted so that increasing encoder counts move in the physically *wrong* direction (e.g., the motor naturally reads 180° at start-of-travel and 0° at end-of-travel, but you want the user to see 0° at start and 180° at end).  This is corrected entirely in software — no hardware or drive configuration changes are needed.
+
+### How to enable it
+
+Add `reverse: true` to the axis entry in `tim_config.yaml`:
+
+```yaml
+rapidcode:
+  axes:
+    A:
+      name: Primary Rotation X12
+      scaling: 364.0888
+      gearbox: 1.0
+      min_pos: 0
+      max_pos: 180
+      software_limit_deg: 180
+      reverse: true        # ← add this line
+```
+
+Restart the service.  No other files need to change.
+
+### What it does
+
+The adapter applies a single linear transform at two points:
+
+| Operation | Formula |
+|---|---|
+| Outgoing setpoint (PA command) | `motor_target = max_pos − user_setpoint` |
+| Incoming position readback | `user_pulses = max_pos × scale − raw_pulses` |
+| Relative move (PR command) | distance sign is negated |
+
+`max_pos` is read from the axis config, so if you ever extend the travel range, update `max_pos` and the inversion automatically follows — no code change required.
+
+**Example — Axis A (Primary Rotation, max_pos = 180°):**
+
+| Physical position | Motor encoder (°) | User display (°) |
+|---|---|---|
+| Top of backswing | 180 | 0 |
+| Address / impact | 90 | 90 |
+| Finish | 0 | 180 |
+
+### How it interacts with Zero Position
+
+The `Zero Position` button stores the current raw encoder value as an offset so you can fine-tune the reference point without touching the drive.  With a reversed axis the semantics are the same — press Zero Position when the axis is at the physical location you want to call 0° **in motor space** (i.e., at `max_pos` in user space, which is the finish end of travel).  The inversion then maps that offset correctly through all subsequent moves and readbacks.
+
+The offset is persisted to `tim_position_offsets.json` beside the service files and restored automatically on every restart.
+
+### Applying to other axes
+
+To reverse any other axis (B, C, D) follow the same steps:
+
+1. Add `reverse: true` to that axis's block in `tim_config.yaml`.
+2. Verify the `max_pos` value is correct for that axis (it is the denominator of the inversion).
+3. Restart the service and confirm that the GUI's Actual Position reads the expected value at each end of travel.
+4. Re-run Zero Position if the reference needs adjustment.
+
+No code changes are required — the `_is_reversed()` check in `tim_rapidcode_adapter.py` applies to any axis whose config contains `reverse: true`.
+
 ## Testing
 
 Run unit tests:

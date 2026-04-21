@@ -8,6 +8,7 @@ Handles enable, disable, absolute move, relative move, speed, accel, position qu
 This adapter manages the deterministic 1 kHz EtherCAT motion control loop.
 """
 
+import json
 import logging
 import os
 import re
@@ -17,6 +18,8 @@ import time
 import importlib.util
 import sys
 from pathlib import Path
+
+_OFFSET_FILE = Path(__file__).resolve().parent / 'tim_position_offsets.json'
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,7 @@ class RapidCodeAdapter:
         self._axis_units_fallback_logged = set()
         self._pending_motion = {}
         self._motion_start_time = {}
+        self._position_offset = {}  # axis_idx -> encoder offset set by Zero Position
         self.axis_configs = self.config.get('axes', {})
         if not self.axis_configs:
             # yaml has no axes section — fall back to INI (e.g. service started before GUI synced)
@@ -196,6 +200,31 @@ class RapidCodeAdapter:
                 self.axis_configs[axis_letter]['jerk'],
             )
         logger.info("Axis A-D parameters loaded from %s", ini_path)
+        self._load_offsets()
+
+    def _save_offsets(self):
+        """Persist position offsets to disk so they survive service restarts."""
+        try:
+            data = {str(k): v for k, v in self._position_offset.items()}
+            _OFFSET_FILE.write_text(json.dumps(data), encoding='utf-8')
+            logger.info("Position offsets saved: %s", data)
+        except Exception as e:
+            logger.error("Failed to save position offsets: %s", e)
+
+    def _load_offsets(self):
+        """Restore persisted position offsets after hardware is ready."""
+        if not _OFFSET_FILE.exists():
+            return
+        try:
+            data = json.loads(_OFFSET_FILE.read_text(encoding='utf-8'))
+            self._position_offset = {int(k): float(v) for k, v in data.items()}
+            logger.info("Position offsets restored: %s", self._position_offset)
+        except Exception as e:
+            logger.error("Failed to load position offsets: %s", e)
+
+    def _is_reversed(self, axis_idx):
+        """Return True if this axis has reverse: true in config (inverts user↔motor direction)."""
+        return bool(self._get_axis_config(axis_idx).get('reverse', False))
 
     def _pulse_scale(self, axis_idx):
         """Return GUI pulse-per-user-unit scale for an axis."""
@@ -339,6 +368,8 @@ class RapidCodeAdapter:
                     logger.warning("Axis %s SoftwareLimitHighSet/LowSet not available", chr(65 + axis_idx))
             except Exception as lim_err:
                 logger.warning("Axis %s software limit set failed: %s", chr(65 + axis_idx), lim_err)
+
+        self._load_offsets()
 
     def _init_rapidcode(self):
         """Initialize real RapidCode connection."""
@@ -676,10 +707,15 @@ class RapidCodeAdapter:
             if self._get_axis(axis_idx) is None:
                 logger.error(f"Absolute move failed: axis object unavailable for {chr(65+axis_idx)}")
                 return "0"
+            if self._is_reversed(axis_idx):
+                max_pos = float(self._get_axis_config(axis_idx).get('max_pos', 180.0))
+                value = max_pos - value
+            offset = self._position_offset.get(axis_idx, 0.0)
+            raw_target = value + offset
             pending = self._ensure_pending_motion(axis_idx)
             pending['mode'] = 'abs'
-            pending['target'] = value
-            logger.info(f"Axis {chr(65+axis_idx)} staged absolute move to {value}")
+            pending['target'] = raw_target
+            logger.info(f"Axis {chr(65+axis_idx)} staged absolute move to {value}° (raw={raw_target:.4f})")
             return "1"
         except Exception as e:
             logger.error(f"Failed to move axis {axis_idx}: {e}")
@@ -691,6 +727,8 @@ class RapidCodeAdapter:
             if self._get_axis(axis_idx) is None:
                 logger.error(f"Relative move failed: axis object unavailable for {chr(65+axis_idx)}")
                 return "0"
+            if self._is_reversed(axis_idx):
+                value = -value
             pending = self._ensure_pending_motion(axis_idx)
             pending['mode'] = 'rel'
             pending['distance'] = value
@@ -785,7 +823,11 @@ class RapidCodeAdapter:
                 self._last_position = {}
             if axis is not None:
                 position = axis.ActualPositionGet()
-                norm_pos = self._normalize_readback_to_pulses(axis_idx, position)
+                offset = self._position_offset.get(axis_idx, 0.0)
+                norm_pos = self._normalize_readback_to_pulses(axis_idx, position - offset)
+                if self._is_reversed(axis_idx):
+                    max_pos = float(self._get_axis_config(axis_idx).get('max_pos', 180.0))
+                    norm_pos = max_pos * self._pulse_scale(axis_idx) - norm_pos
                 # Only update cache if nonzero or cache is empty
                 if norm_pos != 0 or axis_idx not in self._last_position:
                     self._last_position[axis_idx] = norm_pos
@@ -829,9 +871,22 @@ class RapidCodeAdapter:
             return "0"
     
     def _handle_clear_position(self, axis_idx):
-        """Zero the position register — software offset approach not yet implemented."""
-        logger.info("Axis %s Zero Position requested (not yet implemented)", chr(65 + axis_idx))
-        return "1"
+        """Store current encoder position as zero offset. All subsequent moves and
+        readbacks are expressed relative to this point. The drive is never touched.
+        """
+        try:
+            axis = self._get_axis(axis_idx)
+            if axis is None:
+                logger.error("Zero position failed: axis object unavailable for %s", chr(65 + axis_idx))
+                return "0"
+            raw = axis.ActualPositionGet()
+            self._position_offset[axis_idx] = raw
+            logger.info("Axis %s zero offset set to %.4f encoder units (user zero = 0°)", chr(65 + axis_idx), raw)
+            self._save_offsets()
+            return "1"
+        except Exception as e:
+            logger.error("Failed to set zero offset for axis %s: %s", chr(65 + axis_idx), e)
+            return "0"
 
     def _handle_stop(self, axis_idx):
         """Stop axis motion."""

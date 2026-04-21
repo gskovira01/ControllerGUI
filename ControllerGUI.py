@@ -3017,9 +3017,10 @@ while True:
                     # Suppress a zero reading only if we've previously seen a non-zero position
                     # (motor was somewhere non-zero and is now falsely reading 0 during decel/stop).
                     # Before the first real move, 0 is genuine and must be shown.
+                    # After 3 consecutive zeros, accept as genuine (e.g. motor parked at 0° end-stop).
                     last_known = window._last_valid_pos[i-1] if window._last_valid_pos[i-1] else ''
                     has_seen_nonzero = last_known not in ('', '0', 'N/A')
-                    if pos_val_disp == 0 and not last_setpoint_zero and has_seen_nonzero:
+                    if pos_val_disp == 0 and not last_setpoint_zero and has_seen_nonzero and consecutive_zero[i-1] < 3:
                         valid = False
                     else:
                         if not window_closed:
@@ -3145,25 +3146,22 @@ while True:
         continue
     # Zero Position button (handle early so it isn't swallowed by generic S*_action logic)
     if isinstance(event, str) and event.endswith('_zero_pos'):
-        import time
-        import traceback
-        print(f'[DEBUG {time.time():.3f}] Zero Pos button clicked, event={event}')
-        print(f'[DEBUG] Call stack:')
-        for line in traceback.format_stack()[:-1]:
-            print(line.strip())
         try:
             servo_num = int(event[1:event.index('_')])
-            print(f'[DEBUG] Parsed servo_num={servo_num}')
             axis_letter = AXIS_LETTERS[servo_num - 1]
-            print(f'[DEBUG] Axis letter={axis_letter}')
-            
+            confirm = sg.popup_yes_no(
+                f'Set current position as ZERO for Axis {axis_letter}?\n\nThis cannot be undone without re-homing.',
+                title='Confirm Zero Position',
+                keep_on_top=True,
+            )
+            if confirm != 'Yes':
+                continue
+
             # Use axis-specific command instead of multi-axis format
             dp_cmd = f"DP{axis_letter}=0"
-            print(f'[DEBUG] Sending zero position command: {dp_cmd}')
-            
+
             # Route to correct comm object
             response = send_axis_command(axis_letter, dp_cmd)
-            print(f'[DEBUG] Response: {response}')
             if axis_letter == 'E':
                 # [CHANGE 2026-03-27 11:20:00 -04:00] Servo E zero immediately resets displayed/cached commanded position.
                 zero_ok = not (
